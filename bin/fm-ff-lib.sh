@@ -17,9 +17,11 @@
 # A tracked-files fast-forward never touches the gitignored operational dirs
 # (data/, state/, config/, projects/, .no-mistakes/), so it cannot disturb a
 # secondmate's backlog, projects, or in-flight work.
-# The seeded .fm-secondmate-home identity marker is gitignored too; the local
-# sync tolerates only that marker during the one-time upgrade of pre-ignore
-# linked-worktree homes.
+# The shared dirt gate preserves an exact untracked root treehouse.toml operator
+# machine configuration while every other porcelain record blocks fast-forward.
+# The seeded .fm-secondmate-home identity marker is gitignored too; local sync
+# additionally tolerates that exact marker only during the one-time upgrade of
+# pre-ignore linked-worktree homes.
 # Homes are leased at a detached HEAD on the
 # default branch, so the fast-forward advances HEAD only and never moves the
 # shared default branch or any other worktree's checkout.

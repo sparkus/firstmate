@@ -6,11 +6,11 @@
 # Self-heals the one unambiguously safe drift: a clean, detached HEAD that holds
 # no unique commits (it is an ancestor of origin/<default>) and whose <default>
 # branch is free to check out is re-attached and then fast-forwarded ("recovered:").
-# Every other off-default state - a non-default named branch, a detached HEAD with
-# unique commits, a dirty tree, or a diverged default - may hold real work, so it
-# is left untouched and reported as a quantified, loud "STUCK: ... N commits behind
-# ... - needs attention" warning rather than a quiet drift. Nothing is ever forced,
-# stashed, or discarded.
+# Every other unsafe state - a non-default named branch, a detached HEAD with
+# unique commits, a tree rejected by fm-ff-lib.sh's shared dirty-status gate, or
+# a diverged default - may hold real work, so it is left untouched and reported
+# as a quantified, loud "STUCK: ... N commits behind ... - needs attention"
+# warning rather than a quiet drift. Nothing is ever forced, stashed, or discarded.
 # Still skips (benignly) local-only/no-origin projects, missing remotes/branches,
 # and fetch failures.
 # Pruning never deletes the checked-out branch or a branch that still has a
