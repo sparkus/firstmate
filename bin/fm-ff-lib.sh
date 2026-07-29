@@ -25,6 +25,9 @@
 # shared default branch or any other worktree's checkout.
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
+# Exact untracked root paths known to be operator-owned machine configuration.
+# Keep this allowlist explicit: every other status entry must block fast-forward.
+TOLERATED_UNTRACKED_LOCAL_CONFIG="treehouse.toml"
 
 # --- helpers ---------------------------------------------------------------
 
@@ -224,11 +227,17 @@ changed_instr() {
 
 dirty_status() {
   local dir=$1 ignore_seed_marker=${2:-no}
-  if [ "$ignore_seed_marker" = yes ]; then
-    git -C "$dir" status --porcelain 2>/dev/null | awk -v marker="?? $SUB_HOME_MARKER" '$0 != marker { print; exit }'
-  else
-    git -C "$dir" status --porcelain 2>/dev/null | head -1
-  fi
+  # Match complete porcelain records so similarly named paths remain dirty.
+  git -C "$dir" status --porcelain 2>/dev/null \
+    | awk \
+      -v ignore_seed_marker="$ignore_seed_marker" \
+      -v local_config="?? $TOLERATED_UNTRACKED_LOCAL_CONFIG" \
+      -v seed_marker="?? $SUB_HOME_MARKER" \
+      '
+        $0 == local_config { next }
+        ignore_seed_marker == "yes" && $0 == seed_marker { next }
+        { print; exit }
+      '
 }
 
 secondmate_registry_field() {
