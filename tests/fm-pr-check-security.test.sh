@@ -2396,6 +2396,11 @@ SH
     "watcher did not continue the healthy authenticated poll"
   [ ! -e "$state/task-a.check.sh" ] && [ ! -L "$state/task-a.check.sh" ] \
     || fail "watcher continuation rearmed the unsafe legacy check"
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-wake-drain.sh" \
+    > "$dir/watch-drain.out" 2>/dev/null \
+    || fail "could not drain the healthy poll and its completion refill"
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-refill-complete.sh" no-ready \
+    >/dev/null || fail "could not acknowledge the handled completion refill"
   rm -f "$state/a-replaced.check.sh" "$state/.last-check" "$x_poll_marker"
   printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' custom-ready" > "$state/b-custom.check.sh"
   chmod 0700 "$state/b-custom.check.sh"
