@@ -188,7 +188,13 @@ jobs:
           command -v herdr >/dev/null || { echo "::error::herdr not on PATH after install"; exit 1; }
           command -v treehouse >/dev/null || { echo "::error::treehouse not on PATH after install"; exit 1; }
           herdr --version
-          treehouse --version
+          [ "$(treehouse --version | tr -d '[:space:]')" = "v2.1.0" ] || {
+            echo "::error::expected exact Treehouse pin v2.1.0"
+            exit 1
+          }
+          treehouse get --help | grep -F -- '--lease-holder'
+          treehouse return --help | grep -F -- '--if-lease-holder'
+          treehouse status --help | grep -F -- '--json'
           status=$(herdr status --json)
           printf '%s\n' "$status"
           version=$(printf '%s' "$status" | jq -r '.client.version // empty')

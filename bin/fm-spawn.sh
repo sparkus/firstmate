@@ -274,6 +274,7 @@ ORCA_TERMINAL=
 TREEHOUSE_LEASE_ACQUIRED=0
 TREEHOUSE_LEASE_HOLDER=
 TREEHOUSE_LEASE_STATE=
+META_TMP=
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -303,7 +304,7 @@ parse_orca_worktree_result() {
 }
 
 spawn_abort_cleanup() {
-  local status=$?
+  local status=$? published_wt published_holder published_state
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ] \
      && [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
     if ! spawn_herdr_presentation_order_lock_acquire "${HERDR_PROJECTION_ABORT_SESSION:-}"; then
@@ -354,10 +355,23 @@ spawn_abort_cleanup() {
   # that reuses a recorded worktree never sets TREEHOUSE_LEASE_ACQUIRED, so an
   # abort there cannot free a still-owned slot.
   if [ "${TREEHOUSE_LEASE_ACQUIRED:-0}" = 1 ] && [ -n "${WT:-}" ]; then
-    TREEHOUSE_LEASE_ACQUIRED=0
-    if [ -n "${PROJ_ABS:-}" ] && [ -d "$WT" ] && command -v treehouse >/dev/null 2>&1; then
-      ( cd "$PROJ_ABS" && treehouse return --force --if-lease-holder "$ID" "$WT" ) >/dev/null 2>&1 || true
+    published_wt=$(fm_meta_get "$STATE/$ID.meta" worktree)
+    published_holder=$(fm_meta_get "$STATE/$ID.meta" treehouse_lease_holder)
+    published_state=$(fm_meta_get "$STATE/$ID.meta" treehouse_lease_state)
+    if [ "$published_wt" = "$WT" ] \
+      && [ "$published_holder" = "$ID" ] \
+      && [ "$published_state" = held ]; then
+      TREEHOUSE_LEASE_ACQUIRED=0
+    else
+      TREEHOUSE_LEASE_ACQUIRED=0
+      if [ -n "${PROJ_ABS:-}" ] && [ -d "$WT" ] && command -v treehouse >/dev/null 2>&1; then
+        ( cd "$PROJ_ABS" && treehouse return --force --if-lease-holder "$ID" "$WT" ) >/dev/null 2>&1 || true
+      fi
     fi
+  fi
+  if [ -n "${META_TMP:-}" ]; then
+    rm -f "$META_TMP" 2>/dev/null || true
+    META_TMP=
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_LOCK_HELD=0
@@ -1348,27 +1362,33 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     existing_lease_holder=$(fm_meta_get "$STATE/$ID.meta" treehouse_lease_holder)
     existing_lease_state=$(fm_meta_get "$STATE/$ID.meta" treehouse_lease_state)
   fi
+  case "$existing_lease_state" in
+    '')
+      if [ -n "$existing_lease_holder" ]; then
+        echo "error: recorded worktree ${existing_wt:-<missing>} has a treehouse lease holder without a lease state; refusing recovery" >&2
+        exit 1
+      fi
+      ;;
+    held)
+      if [ "$existing_lease_holder" != "$ID" ] \
+        || [ -z "$existing_wt" ] || [ ! -d "$existing_wt" ] \
+        || ! recorded_treehouse_lease_is_owned "$existing_wt" "$ID"; then
+        echo "error: recorded worktree ${existing_wt:-<missing>} is not leased under task $ID; refusing stale recovery" >&2
+        exit 1
+      fi
+      TREEHOUSE_LEASE_HOLDER=$ID
+      TREEHOUSE_LEASE_STATE=held
+      ;;
+    returning|returned)
+      echo "error: recorded worktree ${existing_wt:-<missing>} has lease state $existing_lease_state; refusing recovery after return" >&2
+      exit 1
+      ;;
+    *)
+      echo "error: recorded worktree ${existing_wt:-<missing>} has unknown lease state $existing_lease_state; refusing recovery" >&2
+      exit 1
+      ;;
+  esac
   if [ -n "$existing_wt" ] && [ -d "$existing_wt" ]; then
-    case "$existing_lease_state" in
-      '') ;;
-      held)
-        if [ "$existing_lease_holder" != "$ID" ] \
-          || ! recorded_treehouse_lease_is_owned "$existing_wt" "$ID"; then
-          echo "error: recorded worktree $existing_wt is not leased under task $ID; refusing stale recovery" >&2
-          exit 1
-        fi
-        TREEHOUSE_LEASE_HOLDER=$ID
-        TREEHOUSE_LEASE_STATE=held
-        ;;
-      returning|returned)
-        echo "error: recorded worktree $existing_wt has lease state $existing_lease_state; refusing recovery after return" >&2
-        exit 1
-        ;;
-      *)
-        echo "error: recorded worktree $existing_wt has unknown lease state $existing_lease_state; refusing recovery" >&2
-        exit 1
-        ;;
-    esac
     WT=$existing_wt
     validate_spawn_worktree "recorded worktree" "$T"
   else
@@ -1696,6 +1716,10 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+META_TMP=$(mktemp "$STATE/.${ID}.meta.XXXXXX") || {
+  echo "error: could not create temporary metadata for task $ID" >&2
+  exit 1
+}
 {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
@@ -1738,7 +1762,15 @@ META_WINDOW=$T
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-} > "$STATE/$ID.meta"
+} > "$META_TMP" || {
+  echo "error: could not write metadata for task $ID" >&2
+  exit 1
+}
+mv -f "$META_TMP" "$STATE/$ID.meta" || {
+  echo "error: could not publish metadata for task $ID" >&2
+  exit 1
+}
+META_TMP=
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 # Meta now owns the worktree path; abort must not release a successfully
 # published ship/scout lease (teardown is the only release path).

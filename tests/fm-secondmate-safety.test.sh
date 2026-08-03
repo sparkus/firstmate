@@ -1641,6 +1641,107 @@ EOF
   pass "secondmate force teardown discards child work"
 }
 
+test_secondmate_force_teardown_respects_child_task_lock() {
+  local home subhome childproj childwt fakebin log err entered release holder_pid rc i
+  home="$TMP_ROOT/force-child-lock-home"
+  subhome="$TMP_ROOT/force-child-lock-subhome"
+  childproj="$subhome/projects/alpha"
+  childwt="$TMP_ROOT/force-child-lock-worktree"
+  err="$TMP_ROOT/force-child-lock.err"
+  entered="$TMP_ROOT/force-child-lock.entered"
+  release="$TMP_ROOT/force-child-lock.release"
+  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  fm_git_worktree "$childproj" "$childwt" force-child-lock
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_write_meta "$home/state/domain.meta" \
+    'window=firstmate:fm-domain' "worktree=$subhome" "project=$subhome" \
+    'harness=echo' 'kind=secondmate' 'mode=secondmate' 'yolo=off' \
+    "home=$subhome" 'projects=alpha'
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  fm_write_meta "$subhome/state/child.meta" \
+    'window=firstmate:fm-child' "worktree=$childwt" "project=$childproj" \
+    'harness=echo' 'kind=ship' 'mode=no-mistakes' 'yolo=off'
+  fakebin=$(make_fake_tmux "$TMP_ROOT/force-child-lock-fake")
+  log="$TMP_ROOT/force-child-lock-fake/tmux.log"
+
+  FM_STATE_OVERRIDE="$subhome/state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 1
+    : > "$3"
+    while [ ! -e "$4" ]; do sleep 0.01; done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$subhome/state/.spawn-child.lock" "$entered" "$release" &
+  holder_pid=$!
+  i=0
+  while [ ! -e "$entered" ] && [ "$i" -lt 200 ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$entered" ] || {
+    : > "$release"
+    wait "$holder_pid" || true
+    fail "child task lock fixture did not acquire its lock"
+  }
+
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-child-lock-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"
+  rc=$?
+  set -e
+  : > "$release"
+  wait "$holder_pid"
+
+  [ "$rc" -ne 0 ] || fail "forced secondmate teardown ignored a live child task lock"
+  grep -F 'another spawn or teardown is already handling child task child' "$err" >/dev/null \
+    || fail "forced teardown did not explain the child task lock contention"
+  [ -d "$childwt" ] || fail "forced teardown removed child work while its task lock was held"
+  [ -e "$subhome/state/child.meta" ] || fail "forced teardown retired child metadata while its task lock was held"
+  grep -F 'kill-window' "$log" >/dev/null && fail "forced teardown killed an endpoint before child lock acquisition"
+  pass "secondmate forced cleanup shares each child task lifecycle lock"
+}
+
+test_secondmate_force_teardown_fails_closed_on_leased_child_return() {
+  local home subhome childproj childwt fakebin log err rc
+  home="$TMP_ROOT/force-leased-child-home"
+  subhome="$TMP_ROOT/force-leased-child-subhome"
+  childproj="$subhome/projects/alpha"
+  childwt="$TMP_ROOT/force-leased-child-worktree"
+  err="$TMP_ROOT/force-leased-child.err"
+  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  fm_git_worktree "$childproj" "$childwt" force-leased-child
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_write_meta "$home/state/domain.meta" \
+    'window=firstmate:fm-domain' "worktree=$subhome" "project=$subhome" \
+    'harness=echo' 'kind=secondmate' 'mode=secondmate' 'yolo=off' \
+    "home=$subhome" 'projects=alpha'
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  fm_write_meta "$subhome/state/child.meta" \
+    'window=firstmate:fm-child' "worktree=$childwt" "project=$childproj" \
+    'harness=echo' 'kind=ship' 'mode=no-mistakes' 'yolo=off' \
+    'treehouse_lease_holder=child' 'treehouse_lease_state=held'
+  fakebin=$(make_fake_tmux "$TMP_ROOT/force-leased-child-fake")
+  log="$TMP_ROOT/force-leased-child-fake/tmux.log"
+
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-leased-child-fake/pane.txt" \
+    FM_FAKE_TREEHOUSE_RETURN_FAIL=1 \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] || fail "forced teardown succeeded after leased child return failed"
+  grep -F 'treehouse return --force --if-lease-holder child' "$log" >/dev/null \
+    || fail "forced teardown did not guard the child return by lease holder"
+  assert_grep 'treehouse_lease_state=held' "$subhome/state/child.meta" \
+    "forced teardown did not restore the held child lease state after return failure"
+  [ -d "$childwt" ] || fail "forced teardown raw-removed a leased child after return failure"
+  [ -d "$subhome" ] || fail "forced teardown removed the child home after leased return failure"
+  [ -e "$home/state/domain.meta" ] || fail "forced teardown retired parent metadata after leased child return failure"
+  pass "secondmate forced cleanup fails closed on leased child return failure"
+}
+
 test_secondmate_force_teardown_refuses_child_quarantine_symlink() {
   local home subhome childproj childwt external fakebin log err rc
   home="$TMP_ROOT/force-quarantine-home"
@@ -2415,6 +2516,8 @@ test_secondmate_teardown_refuses_ambiguous_and_mismatched_registry_bindings
 test_secondmate_teardown_refuses_failed_leased_home_return
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_force_teardown_discards_child_work
+test_secondmate_force_teardown_respects_child_task_lock
+test_secondmate_force_teardown_fails_closed_on_leased_child_return
 test_secondmate_force_teardown_refuses_child_quarantine_symlink
 test_secondmate_force_teardown_preserves_child_on_unproven_lock
 test_secondmate_force_teardown_allows_operational_dir_symlinks_inside_home

@@ -320,9 +320,12 @@ SH
   chmod +x "$fakebin/gh"
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
-  printf '%s\n' 'Usage: treehouse get [--lease]'
-fi
+case "${1:-}:${2:-}" in
+  --version:*) printf '%s\n' 'v2.1.0' ;;
+  get:--help) printf '%s\n' 'Usage: treehouse get [--lease] [--lease-holder <holder>]' ;;
+  return:--help) printf '%s\n' 'Usage: treehouse return [--if-lease-holder <holder>]' ;;
+  status:--help) printf '%s\n' 'Usage: treehouse status [--json]' ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/treehouse"

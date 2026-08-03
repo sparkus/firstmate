@@ -286,6 +286,21 @@ lease_holder_file() {
   printf '%s\n' "$POOL_DIR/leases/$holder"
 }
 
+install_failing_meta_mv() {
+  local fakebin=$1 real_mv
+  real_mv=$(command -v mv)
+  cat > "$fakebin/mv" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  if [ "\$arg" = "\${FM_FAKE_META_MV_FAIL_DEST:-}" ]; then
+    exit 73
+  fi
+done
+exec '$real_mv' "\$@"
+SH
+  chmod +x "$fakebin/mv"
+}
+
 # ---------------------------------------------------------------------------
 # 1. Spawn leases; a subsequent plain get must not hand out the same path.
 # ---------------------------------------------------------------------------
@@ -474,6 +489,60 @@ test_recovery_refuses_returned_stale_meta() {
   pass "recovery refuses a returned worktree retained in stale metadata"
 }
 
+test_recovery_refuses_one_sided_lease_metadata() {
+  local rec out status marker
+  rec=$(make_lease_case recovery-partial-meta ship-lease-h8)
+  read_lease_case "$rec"
+
+  for marker in holder-only state-only; do
+    fm_write_meta "$HOME_DIR/state/$TASK_ID.meta" \
+      "window=firstmate:fm-$TASK_ID" \
+      "endpoint_task_id=$TASK_ID" \
+      "worktree=$WT_DIR" \
+      "project=$PROJ_DIR" \
+      "harness=codex" \
+      "kind=ship" \
+      "mode=no-mistakes" \
+      "yolo=off"
+    if [ "$marker" = holder-only ]; then
+      printf 'treehouse_lease_holder=%s\n' "$TASK_ID" >> "$HOME_DIR/state/$TASK_ID.meta"
+    else
+      printf 'treehouse_lease_state=held\n' >> "$HOME_DIR/state/$TASK_ID.meta"
+    fi
+    : > "$CASE_DIR/treehouse.log"
+    set +e
+    out=$(run_spawn "$TASK_ID")
+    status=$?
+    set -e
+    [ "$status" -ne 0 ] || fail "recovery accepted $marker treehouse lease metadata"
+    if grep -F 'treehouse get --lease' "$CASE_DIR/treehouse.log" >/dev/null 2>&1; then
+      fail "recovery replaced $marker lease metadata with a new lease"
+    fi
+  done
+  pass "recovery rejects one-sided treehouse lease metadata"
+}
+
+test_failed_meta_publication_returns_fresh_lease() {
+  local rec out status
+  rec=$(make_lease_case atomic-meta-publication ship-lease-i9)
+  read_lease_case "$rec"
+  install_failing_meta_mv "$FAKEBIN_DIR"
+
+  set +e
+  out=$(FM_FAKE_META_MV_FAIL_DEST="$HOME_DIR/state/$TASK_ID.meta" run_spawn "$TASK_ID")
+  status=$?
+  set -e
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite failed atomic metadata publication"
+  assert_contains "$out" "could not publish metadata for task $TASK_ID" \
+    "spawn did not report failed atomic metadata publication"
+  [ ! -e "$HOME_DIR/state/$TASK_ID.meta" ] || fail "failed publication exposed partial task metadata"
+  [ ! -e "$(lease_holder_file "$TASK_ID")" ] || fail "failed publication leaked the fresh treehouse lease"
+  if find "$HOME_DIR/state" -maxdepth 1 -name ".${TASK_ID}.meta.*" -print | grep . >/dev/null; then
+    fail "failed publication left a temporary metadata file"
+  fi
+  pass "failed metadata publication is atomic and returns its fresh lease"
+}
+
 test_teardown_serializes_against_recovery() {
   local rec out status entered release teardown_out teardown_pid spawn_out spawn_status i
   rec=$(make_lease_case teardown-race ship-lease-g7)
@@ -571,6 +640,8 @@ test_successful_teardown_releases_lease
 test_refused_teardown_keeps_lease
 test_recovery_reuses_worktree_without_second_lease
 test_recovery_refuses_returned_stale_meta
+test_recovery_refuses_one_sided_lease_metadata
+test_failed_meta_publication_returns_fresh_lease
 test_teardown_serializes_against_recovery
 test_legacy_unleased_worktree_spawn_and_teardown
 

@@ -131,7 +131,18 @@ FM_LOCK_LOG_PREFIX=teardown
 META="$STATE/$ID.meta"
 TEARDOWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 TEARDOWN_TASK_LOCK_HELD=0
+TEARDOWN_CHILD_TASK_LOCKS=
 teardown_release_task_lock() {
+  local child_lock
+  if [ -n "$TEARDOWN_CHILD_TASK_LOCKS" ]; then
+    while IFS= read -r child_lock; do
+      [ -n "$child_lock" ] || continue
+      fm_lock_release "$child_lock" || true
+    done <<FMEOF
+$TEARDOWN_CHILD_TASK_LOCKS
+FMEOF
+    TEARDOWN_CHILD_TASK_LOCKS=
+  fi
   if [ "$TEARDOWN_TASK_LOCK_HELD" = 1 ]; then
     TEARDOWN_TASK_LOCK_HELD=0
     fm_lock_release "$TEARDOWN_TASK_LOCK" || true
@@ -191,11 +202,16 @@ case "$TREEHOUSE_LEASE_STATE" in
     exit 1
     ;;
 esac
+if [ "$TREEHOUSE_LEASE_STATE" = held ] && { [ -z "$WT" ] || [ ! -d "$WT" ]; }; then
+  echo "REFUSED: task $ID has a held treehouse lease but its worktree is unavailable; preserving metadata." >&2
+  exit 1
+fi
 
-treehouse_lease_state_set() {  # <state>
-  local state=$1 tmp
-  tmp=$(mktemp "$STATE/.${ID}.meta.treehouse-lease.XXXXXX") || return 1
-  if ! { grep -v '^treehouse_lease_state=' "$META" || true; } > "$tmp"; then
+treehouse_lease_state_set_for_meta() {  # <meta> <task-id> <state>
+  local meta=$1 task_id=$2 state=$3 state_dir tmp
+  state_dir=$(dirname "$meta")
+  tmp=$(mktemp "$state_dir/.${task_id}.meta.treehouse-lease.XXXXXX") || return 1
+  if ! { grep -v '^treehouse_lease_state=' "$meta" || true; } > "$tmp"; then
     rm -f "$tmp"
     return 1
   fi
@@ -203,10 +219,15 @@ treehouse_lease_state_set() {  # <state>
     rm -f "$tmp"
     return 1
   }
-  mv -f "$tmp" "$META" || {
+  mv -f "$tmp" "$meta" || {
     rm -f "$tmp"
     return 1
   }
+}
+
+treehouse_lease_state_set() {  # <state>
+  local state=$1
+  treehouse_lease_state_set_for_meta "$META" "$ID" "$state" || return 1
   TREEHOUSE_LEASE_STATE=$state
 }
 
@@ -1112,13 +1133,87 @@ remove_firstmate_home() {
   safe_rm_rf "$abs_home_path" "$label"
 }
 
-validate_firstmate_home_children_removal() {
-  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id
+treehouse_lease_metadata_validate() {  # <meta> <task-id> <label>
+  local meta=$1 task_id=$2 label=$3
+  TREEHOUSE_META_HOLDER=$(meta_value "$meta" treehouse_lease_holder)
+  TREEHOUSE_META_STATE=$(meta_value "$meta" treehouse_lease_state)
+  case "$TREEHOUSE_META_STATE" in
+    '')
+      if [ -n "$TREEHOUSE_META_HOLDER" ]; then
+        echo "REFUSED: $label $task_id has a treehouse lease holder without a lease state; preserving metadata." >&2
+        return 1
+      fi
+      ;;
+    held|returned)
+      if [ "$TREEHOUSE_META_HOLDER" != "$task_id" ]; then
+        echo "REFUSED: $label $task_id has mismatched treehouse lease holder ${TREEHOUSE_META_HOLDER:-<missing>}; preserving metadata." >&2
+        return 1
+      fi
+      ;;
+    returning)
+      echo "REFUSED: $label $task_id has an indeterminate treehouse return; preserving metadata for manual lease inspection." >&2
+      return 1
+      ;;
+    *)
+      echo "REFUSED: $label $task_id has unknown treehouse lease state $TREEHOUSE_META_STATE; preserving metadata." >&2
+      return 1
+      ;;
+  esac
+}
+
+teardown_child_task_lock_held() {  # <lock-path>
+  local wanted=$1 held
+  [ -n "$TEARDOWN_CHILD_TASK_LOCKS" ] || return 1
+  while IFS= read -r held; do
+    [ "$held" != "$wanted" ] || return 0
+  done <<FMEOF
+$TEARDOWN_CHILD_TASK_LOCKS
+FMEOF
+  return 1
+}
+
+lock_firstmate_home_children() {  # <home>
+  local home=$1 sub_state child_meta child_id child_lock child_kind child_wt child_home
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
+    child_lock="$sub_state/.spawn-$child_id.lock"
+    if ! teardown_child_task_lock_held "$child_lock"; then
+      if ! fm_lock_try_acquire "$child_lock"; then
+        echo "error: another spawn or teardown is already handling child task $child_id" >&2
+        return 1
+      fi
+      if [ -n "$TEARDOWN_CHILD_TASK_LOCKS" ]; then
+        TEARDOWN_CHILD_TASK_LOCKS="$TEARDOWN_CHILD_TASK_LOCKS
+$child_lock"
+      else
+        TEARDOWN_CHILD_TASK_LOCKS=$child_lock
+      fi
+    fi
+    [ -e "$child_meta" ] || continue
+    child_kind=$(meta_value "$child_meta" kind)
+    [ -n "$child_kind" ] || child_kind=ship
+    if [ "$child_kind" = secondmate ]; then
+      child_wt=$(meta_value "$child_meta" worktree)
+      child_home=$(meta_value "$child_meta" home)
+      [ -n "$child_home" ] || child_home=$child_wt
+      validate_firstmate_home_for_removal "$child_home" "child firstmate home" "$child_id" >/dev/null || return 1
+      lock_firstmate_home_children "$child_home" || return 1
+    fi
+  done
+}
+
+validate_firstmate_home_children_removal() {
+  local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_lease_state
+  sub_state="$home/state"
+  [ -d "$sub_state" ] || return 0
+  for child_meta in "$sub_state"/*.meta; do
+    [ -e "$child_meta" ] || continue
+    child_id=$(basename "$child_meta" .meta)
+    treehouse_lease_metadata_validate "$child_meta" "$child_id" "child task" || return 1
+    child_lease_state=$TREEHOUSE_META_STATE
     fm_backend_validate_task_endpoint "$child_meta" "$child_id" || return 1
     validate_pr_poll_cleanup "$sub_state" "$child_id" || return 1
     child_wt=$(meta_value "$child_meta" worktree)
@@ -1137,7 +1232,10 @@ validate_firstmate_home_children_removal() {
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
         require_orca_worktree_path_match "$child_orca_worktree_id" "$child_wt" || return 1
       fi
-    elif [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
+    elif [ "$child_lease_state" = held ] && { [ -z "$child_wt" ] || [ ! -d "$child_wt" ]; }; then
+      echo "REFUSED: child task $child_id has a held treehouse lease but its worktree is unavailable; preserving metadata." >&2
+      return 1
+    elif [ "$child_lease_state" != returned ] && [ -n "$child_wt" ] && [ -e "$child_wt" ]; then
       child_proj=$(meta_value "$child_meta" project)
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
     fi
@@ -1286,12 +1384,15 @@ preflight_firstmate_home_herdr_children() {  # <home>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_lease_holder child_lease_state
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
+    treehouse_lease_metadata_validate "$child_meta" "$child_id" "child task" || return 1
+    child_lease_holder=$TREEHOUSE_META_HOLDER
+    child_lease_state=$TREEHOUSE_META_STATE
     child_wt=$(meta_value "$child_meta" worktree)
     child_proj=$(meta_value "$child_meta" project)
     child_kind=$(meta_value "$child_meta" kind)
@@ -1333,7 +1434,7 @@ cleanup_firstmate_home_children() {
       [ -n "$child_home" ] || child_home=$child_wt
       if [ -n "$child_home" ] && [ -d "$child_home" ]; then
         cleanup_firstmate_home_children "$child_home" || return 1
-        remove_firstmate_home "$child_home" "child firstmate home" "$child_id"
+        remove_firstmate_home "$child_home" "child firstmate home" "$child_id" || return 1
       fi
     elif [ "$child_backend" = orca ]; then
       if [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
@@ -1342,13 +1443,27 @@ cleanup_firstmate_home_children() {
           "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       fi
       fm_backend_remove_worktree "$child_backend" "$child_orca_worktree_id" || return 1
-    elif [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
+    elif [ "$child_lease_state" != returned ] && [ -n "$child_wt" ] && [ -d "$child_wt" ]; then
       validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       rm -f "$child_wt/.claude/settings.local.json" "$child_wt/.opencode/plugins/fm-turn-end.js" \
         "$child_wt/.opencode/plugins/fm-busy-state.js" \
         "$child_wt/.fm-grok-turnend" "$child_wt/.fm-kimi-turnend"
       if [ -n "$child_proj" ] && [ -d "$child_proj" ] && command -v treehouse >/dev/null 2>&1; then
-        if teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
+        if [ "$child_lease_state" = held ]; then
+          treehouse_lease_state_set_for_meta "$child_meta" "$child_id" returning || {
+            echo "error: could not record treehouse return ownership for child task $child_id; forced cleanup aborted" >&2
+            return 1
+          }
+          if ! teardown_treehouse_return "$child_wt" "$child_proj" "child worktree" "" "$child_lease_holder"; then
+            treehouse_lease_state_set_for_meta "$child_meta" "$child_id" held || true
+            echo "error: treehouse return failed for leased child worktree $child_wt; forced cleanup aborted" >&2
+            return 1
+          fi
+          treehouse_lease_state_set_for_meta "$child_meta" "$child_id" returned || {
+            echo "error: child worktree returned but returned lease state could not be recorded for $child_id; preserving metadata" >&2
+            return 1
+          }
+        elif teardown_treehouse_return "$child_wt" "$child_proj" "child worktree"; then
           :
         else
           child_return_rc=$?
@@ -1357,6 +1472,9 @@ cleanup_firstmate_home_children() {
           fi
           safe_rm_rf_child_worktree "$child_wt" "$child_proj"
         fi
+      elif [ "$child_lease_state" = held ]; then
+        echo "error: cannot return leased child worktree $child_wt; preserving metadata" >&2
+        return 1
       else
         safe_rm_rf_child_worktree "$child_wt" "$child_proj"
       fi
@@ -1389,6 +1507,7 @@ if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
   if [ "$FORCE" = "--force" ]; then
+    lock_firstmate_home_children "$HOME_PATH" || exit 1
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
     if [ "$BACKEND" = herdr ]; then
       teardown_herdr_preflight_target "$T" "$ID" || exit 1
@@ -1410,7 +1529,7 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
 fi
 
 if [ "$KIND" = secondmate ] && [ "$FORCE" = "--force" ]; then
-  cleanup_firstmate_home_children "$HOME_PATH"
+  cleanup_firstmate_home_children "$HOME_PATH" || exit 1
 fi
 
 if [ "$KIND" = scout ] && [ "$FORCE" != "--force" ]; then

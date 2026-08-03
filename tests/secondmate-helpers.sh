@@ -78,9 +78,11 @@ case "${1:-}" in
   return)
     shift
     target=
+    required_holder=
     while [ $# -gt 0 ]; do
       case "$1" in
         --force) ;;
+        --if-lease-holder) shift; required_holder=${1:-} ;;
         *) target=$1 ;;
       esac
       shift
