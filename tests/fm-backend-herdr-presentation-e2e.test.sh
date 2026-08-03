@@ -211,19 +211,27 @@ set -u
 # path then confirms landing and isolation. Hand out the armed non-worktree
 # path for `get --lease` so landing can match the poisoned pane cwd and
 # isolation validation refuses with the expected message. Plain unleased get
-# still no-ops (legacy discovery path).
-if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
-  has_lease=0
-  for arg in "$@"; do
-    [ "$arg" = "--lease" ] && has_lease=1
-  done
-  if [ "$has_lease" -eq 1 ]; then
-    bad="$POST_CREATE_ABORT_CONTROL/not-a-worktree"
-    mkdir -p "$bad"
-    printf '%s\n' "$bad"
-    exit 0
-  fi
-  exit 0
+# still no-ops (legacy discovery path). Holder-scoped abort return is a no-op
+# on that synthetic path so real treehouse never mutates the lab pool for it.
+if [ -d "$POST_CREATE_ABORT_CONTROL" ]; then
+  case "${1:-}" in
+    get)
+      has_lease=0
+      for arg in "$@"; do
+        [ "$arg" = "--lease" ] && has_lease=1
+      done
+      if [ "$has_lease" -eq 1 ]; then
+        bad="$POST_CREATE_ABORT_CONTROL/not-a-worktree"
+        mkdir -p "$bad"
+        printf '%s\n' "$bad"
+        exit 0
+      fi
+      exit 0
+      ;;
+    return)
+      exit 0
+      ;;
+  esac
 fi
 exec "$REAL_TREEHOUSE" "$@"
 SH
@@ -802,6 +810,13 @@ done
 rm -rf "$POST_CREATE_ABORT_CONTROL"
 rm -f "$HOME_DIR/state/abort-a.herdr-presentation" "$HOME_DIR/state/abort-b.herdr-presentation"
 pass "real Herdr lab: concurrent post-create abort cleanup stays serialized with exact focus restoration"
+
+# Re-pin captain focus before projected shape teardown. Abort cleanup may remove
+# last panes via pane-death (no pane.close audit); restore the known captain tab
+# so shape teardown's focus check is not coupled to neighbor-graph side effects.
+lab tab focus "$SECOND_TWO_TAB" >/dev/null \
+  || fail "could not restore the captured captain tab after post-create abort cleanup"
+assert_focus_is "$CAPTAIN_FOCUS" "post-create abort captain re-pin"
 
 SHAPE_CLEANUP_AUDIT_START=$(focus_audit_line_count)
 teardown_task shape "$HOME_DIR" > "$TMP_ROOT/on-teardown.out" 2> "$TMP_ROOT/on-teardown.err" \
