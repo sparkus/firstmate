@@ -92,10 +92,38 @@ fm_fake_exit0() {
   local fakebin=$1 tool
   shift
   for tool in "$@"; do
-    cat > "$fakebin/$tool" <<'SH'
+    # treehouse ship/scout spawns lease via `get --lease` (path on stdout) then
+    # cd the pane into that path. A bare exit-0 stub would fail the lease step,
+    # so the shared treehouse stub prints FM_FAKE_TREEHOUSE_HOME or
+    # FM_FAKE_PANE_PATH for --lease (the path the fake pane will report) and
+    # no-ops for return. Tests that need custom treehouse behavior still write
+    # their own fake over this one.
+    if [ "$tool" = treehouse ]; then
+      cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  get)
+    has_lease=0
+    for a in "$@"; do
+      [ "$a" = --lease ] && has_lease=1
+    done
+    if [ "$has_lease" -eq 1 ]; then
+      path="${FM_FAKE_TREEHOUSE_HOME:-${FM_FAKE_PANE_PATH:-}}"
+      [ -n "$path" ] && printf '%s\n' "$path"
+    fi
+    exit 0
+    ;;
+  return) exit 0 ;;
+esac
+exit 0
+SH
+    else
+      cat > "$fakebin/$tool" <<'SH'
 #!/usr/bin/env bash
 exit 0
 SH
+    fi
     chmod +x "$fakebin/$tool"
   done
 }

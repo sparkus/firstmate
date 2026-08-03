@@ -50,8 +50,11 @@
 # is the approved discard path that prevalidates child removal targets, discards
 # child work, kills child runtime endpoints, and removes the retired home. Removing a
 # leased home releases its durable treehouse lease so the pool slot is freed,
-# never left leased forever. If the treehouse return fails, teardown leaves the
-# leased home and state in place instead of hiding a still-held lease.
+# never left leased forever. Ship and scout worktrees leased at spawn are
+# released the same way: only a successful `treehouse return` drops the lease.
+# A REFUSED teardown (uncommitted or unlanded work) never reaches return, so the
+# lease stays held and protects the slot. If the treehouse return fails, teardown
+# leaves the leased path and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -1455,7 +1458,7 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
   teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
-    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+    echo "error: treehouse return failed for worktree $WT; teardown aborted; lease may still be held" >&2
     exit 1
   }
 fi
