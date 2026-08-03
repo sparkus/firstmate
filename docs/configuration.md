@@ -37,7 +37,7 @@ Both paths exist so a missed rule cannot starve the queue.
 Neither path spawns work: they only surface the signal.
 Queued refill wakes, pending completion receipts, durable refill-needed markers, and an enabled below-target floor each keep the home supervision-active even when no task metadata remains.
 Successful ship spawn clears a handled completion need automatically, `bin/fm-refill-complete.sh <no-ready|no-eligible|held-only>` clears it after the ordinary claim-and-dispatch attempt completes without a spawn, and a met or disabled floor clears the floor need.
-Until ship worktree leases protect pool slots, every refill payload includes a hold unless each ship worktree, including `local-only`, can be read successfully and proven free of unpushed commits.
+Until ship worktree leases protect pool slots, every refill payload includes a hold when any ship has an unreadable lifecycle state or any parked ship worktree, including `local-only`, cannot be read successfully and proven free of unpushed commits.
 Coordinate with that lease work rather than reimplementing pool protection here.
 This preference is per home and is not part of secondmate inherited configuration.
 
