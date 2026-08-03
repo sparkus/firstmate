@@ -177,8 +177,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 fm_refuse_if_gate_agent
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
-# shellcheck source=bin/fm-wake-lib.sh
-FM_WAKE_DEFER_STATE_INIT=1
+export FM_WAKE_DEFER_STATE_INIT=1
+# shellcheck source=bin/fm-wake-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 unset FM_WAKE_DEFER_STATE_INIT
 # shellcheck source=bin/fm-config-inherit-lib.sh
@@ -954,6 +954,7 @@ validate_spawn_worktree() {  # <source> <inspect-target>
 
 recorded_treehouse_lease_is_owned() {  # <worktree> <holder>
   local worktree=$1 holder=$2 status
+  # shellcheck disable=SC1003
   case "$worktree" in
     *'"'*|*'\'*|*$'\n'*|*'},{'*) return 1 ;;
   esac
