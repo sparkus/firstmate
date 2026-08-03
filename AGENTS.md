@@ -371,7 +371,8 @@ Handle actionable wakes as follows:
 2. For `stale:`, inspect the recorded endpoint and load `stuck-crewmate-recovery` for a stopped, looping, confused, or unresponsive worker; a deep-inspection reason also requires current-state and validation-log inspection.
 3. For `check:`, act on the named poll result, including merges, X-mode events, and refill signals.
    A `check: refill completion <id>:`, `check: refill floor:`, or `check: refill pending:` wake is claim-next capacity, not a blind spawn: run the normal claim-and-dispatch procedure (verify-at-pickup, atomic claim, exclusions, held and parked items, date gates).
-   Until ship worktree leases land, hold pool dispatch unless `fm_refill_has_parked_unpushed` proves every non-`local-only` ship worktree readable and free of unpushed commits (`bin/fm-refill-lib.sh`).
+   A successful ship spawn clears the handled completion need automatically; after a completed attempt that finds no ready work, no eligible work, or held-only work, run `bin/fm-refill-complete.sh` with the matching `no-ready`, `no-eligible`, or `held-only` outcome.
+   Until ship worktree leases land, hold pool dispatch unless `fm_refill_has_parked_unpushed` proves every ship worktree readable and free of unpushed commits (`bin/fm-refill-lib.sh`).
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
 
 When any wake reports a merged PR for a project cloned in this home, refresh that clone through the guarded fleet-sync path.

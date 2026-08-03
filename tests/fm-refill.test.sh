@@ -10,6 +10,8 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
+WATCH="$ROOT/bin/fm-watch.sh"
+REFILL_COMPLETE="$ROOT/bin/fm-refill-complete.sh"
 TMP_ROOT=$(fm_test_tmproot fm-refill-tests)
 
 make_refill_home() {
@@ -21,6 +23,26 @@ make_refill_home() {
 cat "$FM_STATE_OVERRIDE/$1.current" 2>/dev/null || printf 'state: unknown · source: none · fixture\n'
 SH
   chmod +x "$dir/fake-crew-state"
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = display-message ]; then
+  target=
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = -t ]; then
+      target=${2:-}
+      break
+    fi
+    shift
+  done
+  [ -n "$target" ] || exit 1
+  [ "$target" != "${FM_REFILL_DEAD_TARGET:-}" ] || exit 1
+  printf '%%1\n'
+  exit 0
+fi
+exit 1
+SH
+  chmod +x "$dir/fakebin/tmux"
   printf '%s\n' "$dir"
 }
 
@@ -29,7 +51,9 @@ source_refill() {
   # shellcheck disable=SC1090,SC1091
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
     FM_CREW_STATE_BIN="$home/fake-crew-state" \
+    FM_REFILL_DEAD_TARGET="${FM_REFILL_DEAD_TARGET:-}" \
     FM_REFILL_TEST_STOP_AFTER_PENDING="${FM_REFILL_TEST_STOP_AFTER_PENDING:-0}" \
+    PATH="$home/fakebin:$PATH" \
     bash -c '
       set -e
       . "$1"
@@ -67,6 +91,9 @@ test_completion_double_fire_emits_once() {
     || fail "wake payload missing completion claim-next instruction"
   grep -F 'do not blind-spawn' "$state/.wake-queue" >/dev/null \
     || fail "wake payload must forbid blind-spawn"
+  grep -F 'bin/fm-refill-complete.sh <no-ready|no-eligible|held-only>' \
+    "$state/.wake-queue" >/dev/null \
+    || fail "wake payload must carry the handled empty-cycle boundary"
   pass "double completion delivery produces exactly one refill signal"
 }
 
@@ -233,6 +260,18 @@ test_parked_ship_meta_does_not_count_live() {
   pass "parked ship metadata does not count as live capacity"
 }
 
+test_working_ship_with_dead_endpoint_does_not_count_live() {
+  local home live
+  home=$(make_refill_home floor-dead-endpoint)
+  printf 'window=w-live\nkind=ship\n' > "$home/state/live.meta"
+  printf 'window=w-dead\nkind=ship\n' > "$home/state/dead.meta"
+  printf 'state: working · source: run-step · active run\n' > "$home/state/live.current"
+  printf 'state: working · source: run-step · lingering active run\n' > "$home/state/dead.current"
+  live=$(FM_REFILL_DEAD_TARGET=w-dead source_refill "$home" fm_refill_live_ship_count)
+  [ "$live" = 1 ] || fail "dead endpoint inflated live capacity: $live"
+  pass "live ship count requires working lifecycle and a present endpoint"
+}
+
 test_parked_unpushed_probe() {
   local home wt
   home=$(make_refill_home parked-probe)
@@ -245,7 +284,7 @@ test_parked_unpushed_probe() {
   git -C "$wt" add f
   git -C "$wt" commit -qm init
   # No remotes → HEAD --not --remotes lists the commit as unpushed.
-  printf 'window=w1\nkind=ship\nmode=no-mistakes\nworktree=%s\n' "$wt" \
+  printf 'window=w1\nkind=ship\nmode=local-only\nworktree=%s\n' "$wt" \
     > "$home/state/parked.meta"
   source_refill "$home" fm_refill_has_parked_unpushed \
     || fail "parked unpushed ship should report hazard"
@@ -255,7 +294,64 @@ test_parked_unpushed_probe() {
   grep -F 'HOLD: parked ship worktree safety is not proven' \
     "$home/state/.wake-queue" >/dev/null \
     || fail "floor payload must include parked-unpushed hold"
-  pass "parked unpushed probe holds floor payload without blocking the signal"
+  pass "parked local-only unpushed work holds refill without blocking the signal"
+}
+
+
+test_running_watcher_surfaces_late_refill() {
+  local home state out watcher_pid i
+  home=$(make_refill_home watcher-late-refill)
+  state="$home/state"
+  out="$home/watcher.out"
+
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_CREW_STATE_BIN="$home/fake-crew-state" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  watcher_pid=$!
+  i=0
+  while [ "$i" -lt 40 ] && [ ! -e "$state/.last-watcher-beat" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$state/.last-watcher-beat" ] || {
+    kill "$watcher_pid" 2>/dev/null || true
+    fail "watcher did not enter its cycle before late refill emit"
+  }
+  source_refill "$home" fm_refill_emit_completion late-task \
+    || fail "late completion emit should succeed"
+  wait_for_exit "$watcher_pid" 40 || {
+    kill "$watcher_pid" 2>/dev/null || true
+    fail "running watcher did not surface late refill"
+  }
+  grep -F 'check: refill completion late-task:' "$out" >/dev/null \
+    || fail "running watcher omitted late completion reason: $(cat "$out")"
+  pass "running watcher surfaces refill emitted after startup"
+}
+
+test_handled_empty_claim_cycle_clears_completion_need() {
+  local home state out
+  home=$(make_refill_home handled-no-ready)
+  state="$home/state"
+
+  source_refill "$home" fm_refill_emit_completion empty-task \
+    || fail "completion emit should succeed"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null \
+    || fail "completion wake drain should succeed"
+  [ -f "$state/.refill-needed-completion" ] \
+    || fail "drained completion must remain pending before pickup handling"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$home/config" \
+    "$REFILL_COMPLETE" no-ready) \
+    || fail "handled no-ready outcome should complete the refill cycle"
+  [ "$out" = 'refill claim-and-dispatch cycle completed: no-ready' ] \
+    || fail "unexpected refill completion output: $out"
+  [ ! -e "$state/.refill-needed-completion" ] \
+    || fail "handled no-ready outcome left completion need behind"
+  source_refill "$home" fm_refill_surface_pending_if_needed \
+    && fail "handled empty claim cycle must not enqueue refill-pending again" || true
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "handled empty claim cycle re-enqueued a refill wake"
+  pass "handled no-ready claim cycle clears completion supervision need"
 }
 
 test_unreadable_git_state_fails_closed_for_both_payloads() {
@@ -330,7 +426,10 @@ test_floor_at_or_above_target_silent
 test_absent_config_floor_off
 test_scouts_and_secondmates_do_not_count_as_live_ships
 test_parked_ship_meta_does_not_count_live
+test_working_ship_with_dead_endpoint_does_not_count_live
 test_parked_unpushed_probe
 test_unreadable_git_state_fails_closed_for_both_payloads
 test_empty_home_floor_is_explicit_supervision_need
+test_running_watcher_surfaces_late_refill
+test_handled_empty_claim_cycle_clears_completion_need
 test_invalid_task_id_refused

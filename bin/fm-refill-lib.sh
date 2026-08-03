@@ -12,6 +12,8 @@
 _FM_REFILL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$_FM_REFILL_LIB_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$_FM_REFILL_LIB_DIR/fm-backend.sh"
 
 FM_REFILL_CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 FM_REFILL_REASON=
@@ -60,7 +62,7 @@ fm_refill_concurrency_floor() {
 }
 
 fm_refill_live_ship_count() {
-  local state=${1:-$STATE} meta id kind verdict n=0
+  local state=${1:-$STATE} meta id kind backend target verdict n=0
   local reader=${FM_CREW_STATE_BIN:-$_FM_REFILL_LIB_DIR/fm-crew-state.sh}
   shopt -s nullglob
   for meta in "$state"/*.meta; do
@@ -70,6 +72,10 @@ fm_refill_live_ship_count() {
     kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     [ -n "$kind" ] || kind=ship
     [ "$kind" = ship ] || continue
+    backend=$(fm_backend_of_meta "$meta")
+    target=$(fm_backend_target_of_meta "$meta")
+    [ -n "$target" ] || continue
+    fm_backend_target_exists "$backend" "$target" "fm-$id" || continue
     verdict=$(FM_HOME="$(dirname "$state")" FM_STATE_OVERRIDE="$state" \
       FM_CREW_STATE_NM_TIMEOUT="${FM_REFILL_CREW_STATE_NM_TIMEOUT:-2}" \
       "$reader" "$id" 2>/dev/null) || verdict=
@@ -82,7 +88,7 @@ fm_refill_live_ship_count() {
 }
 
 fm_refill_has_parked_unpushed() {
-  local state=${1:-$STATE} meta kind mode wt unpushed
+  local state=${1:-$STATE} meta kind wt unpushed
   FM_REFILL_HAZARD=
   shopt -s nullglob
   for meta in "$state"/*.meta; do
@@ -94,9 +100,6 @@ fm_refill_has_parked_unpushed() {
     kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     [ -n "$kind" ] || kind=ship
     [ "$kind" = ship ] || continue
-    mode=$(grep '^mode=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-    [ -n "$mode" ] || mode=no-mistakes
-    [ "$mode" != local-only ] || continue
     wt=$(grep '^worktree=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     if [ -z "$wt" ] || [ ! -d "$wt" ]; then
       FM_REFILL_HAZARD="unknown worktree state for $(basename "$meta" .meta)"
@@ -123,6 +126,10 @@ fm_refill_hold_suffix() {
   if fm_refill_has_parked_unpushed "$state"; then
     printf '%s' "; HOLD: parked ship worktree safety is not proven ($FM_REFILL_HAZARD) - do not pool-dispatch until leases protect ship worktrees or the state is proven clear"
   fi
+}
+
+fm_refill_handled_suffix() {
+  printf '%s' '; after the claim-and-dispatch attempt, a successful ship spawn clears any completion need automatically; otherwise run bin/fm-refill-complete.sh <no-ready|no-eligible|held-only>'
 }
 
 fm_refill_completion_marker() {
@@ -225,7 +232,7 @@ fm_refill_emit_floor_if_needed() {
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 1
   fi
-  payload="check: refill floor: live ships $live below target $floor; run normal claim-and-dispatch (tasks-axi ready, date gates, exclusions, held and parked); do not blind-spawn$(fm_refill_hold_suffix "$state")"
+  payload="check: refill floor: live ships $live below target $floor; run normal claim-and-dispatch (tasks-axi ready, date gates, exclusions, held and parked); do not blind-spawn$(fm_refill_handled_suffix)$(fm_refill_hold_suffix "$state")"
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   fm_refill_mark_needed "$(fm_refill_floor_needed_marker "$state")" || {
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
@@ -248,7 +255,7 @@ fm_refill_emit_completion() {
   fm_refill_task_id_valid "$id" || return 1
   marker=$(fm_refill_completion_marker "$id")
   key="refill:$id"
-  payload="check: refill completion $id: run normal claim-and-dispatch (tasks-axi ready, date gates, exclusions, held and parked); do not blind-spawn$(fm_refill_hold_suffix "$STATE")"
+  payload="check: refill completion $id: run normal claim-and-dispatch (tasks-axi ready, date gates, exclusions, held and parked); do not blind-spawn$(fm_refill_handled_suffix)$(fm_refill_hold_suffix "$STATE")"
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   marker_state=$(fm_refill_marker_state "$marker")
   if [ "$marker_state" = committed ]; then
@@ -318,10 +325,9 @@ fm_refill_supervision_needed() {
   fm_refill_count_below_target "$live" "$floor"
 }
 
-fm_refill_emit_pending_if_needed() {
+fm_refill_surface_pending_if_needed() {
   local payload existing
   FM_REFILL_REASON=
-  fm_refill_emit_floor_if_needed >/dev/null 2>&1 || true
   fm_refill_recover_pending_completions "$STATE"
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   existing=$(fm_refill_queue_any_payload_locked 2>/dev/null || true)
@@ -334,7 +340,7 @@ fm_refill_emit_pending_if_needed() {
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 1
   fi
-  payload="check: refill pending: run normal claim-and-dispatch (tasks-axi ready, date gates, exclusions, held and parked); do not blind-spawn$(fm_refill_hold_suffix "$STATE")"
+  payload="check: refill pending: run normal claim-and-dispatch (tasks-axi ready, date gates, exclusions, held and parked); do not blind-spawn$(fm_refill_handled_suffix)$(fm_refill_hold_suffix "$STATE")"
   if fm_wake_append_locked check refill-pending "$payload"; then
     FM_REFILL_REASON=$payload
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
@@ -342,6 +348,11 @@ fm_refill_emit_pending_if_needed() {
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return 1
+}
+
+fm_refill_emit_pending_if_needed() {
+  fm_refill_emit_floor_if_needed >/dev/null 2>&1 || true
+  fm_refill_surface_pending_if_needed
 }
 
 fm_refill_dispatch_cycle_completed() {

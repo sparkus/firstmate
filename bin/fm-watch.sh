@@ -729,6 +729,10 @@ while :; do
     exit 0
   fi
 
+  if fm_refill_surface_pending_if_needed; then
+    wake "$FM_REFILL_REASON"
+  fi
+
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
   touch "$STATE/.last-watcher-beat"
