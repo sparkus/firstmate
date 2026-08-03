@@ -234,16 +234,26 @@ Ctrl+c:cancel'
 test_grok_regex_isolated() {
   local state out
   state=$(new_state_dir grok-arm)
+  # Older footer form still classifies busy (mixed-fleet compatibility).
   out=$(fm_busy_classify tmux w1 grok t1 "$state" 'thinking hard
 Ctrl+c:cancel')
-  [ "$out" = "busy grok-regex" ] || fail "grok busy tail must classify 'busy grok-regex', got '$out'"
+  [ "$out" = "busy grok-regex" ] || fail "older Ctrl+c:cancel busy tail must classify 'busy grok-regex', got '$out'"
+  # Grok 4.5 / Build 0.2.118 live busy footer (2026-08-02): Esc:cancel.
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" 'Shift+Tab:mode  │  Esc:cancel  │  Ctrl+x:shortcuts')
+  [ "$out" = "busy grok-regex" ] || fail "Grok 4.5 Esc:cancel busy footer must classify 'busy grok-regex', got '$out'"
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" 'Waiting for response…
+Esc:cancel')
+  [ "$out" = "busy grok-regex" ] || fail "bare Esc:cancel busy token must classify 'busy grok-regex', got '$out'"
+  # Idle directions: bare prompt, and the live 4.5 idle keybind bar (no :cancel).
   out=$(fm_busy_classify tmux w1 grok t1 "$state" 'done.
 > ')
   [ "$out" = "idle grok-regex" ] || fail "grok idle tail must classify 'idle grok-regex', got '$out'"
+  out=$(fm_busy_classify tmux w1 grok t1 "$state" 'Shift+Tab:mode  │  Ctrl+x:shortcuts')
+  [ "$out" = "idle grok-regex" ] || fail "Grok 4.5 idle footer without :cancel must classify 'idle grok-regex', got '$out'"
   # Another adapter's footer never makes grok busy either.
   out=$(fm_busy_classify tmux w1 grok t1 "$state" '• Working (6s • esc to interrupt)')
   [ "$out" = "idle grok-regex" ] || fail "a claude footer must not classify grok busy, got '$out'"
-  pass "the grok fallback is regex-scoped to grok and classifies only grok tasks"
+  pass "the grok fallback matches both cancel-footer forms and classifies idle without them"
 }
 
 # --- kimi verification gate -----------------------------------------------------

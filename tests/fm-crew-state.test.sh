@@ -827,22 +827,35 @@ test_no_run_footer_text_alone_is_not_working() {
 
 # Grok keeps its isolated temporary rendered-tail fallback until its structured
 # lifecycle is live-verified, so a grok crew still reads working from its own
-# verified signature.
+# verified signature (both older and Grok 4.5 cancel-footer forms).
 test_no_run_grok_uses_isolated_fallback() {
   reset_fakes
-  local d; d=$(new_case busy-grok)
+  local d out
+  d=$(new_case busy-grok)
   make_repo_on_branch "$d/wt" fm/feat-h3
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-h3.meta" "window=fm:fm-feat-h3" "worktree=$d/wt" "kind=ship" "harness=grok"
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=1
+  # Older form.
   FM_FAKE_BUSY_TEXT='Ctrl+c:cancel'
   export FM_FAKE_BUSY_TEXT
-  local out; out=$(run_crew_state "$d" feat-h3)
-  assert_contains "$out" "state: working" "grok busy tail -> working"
+  out=$(run_crew_state "$d" feat-h3)
+  assert_contains "$out" "state: working" "grok older Ctrl+c:cancel busy tail -> working"
   assert_contains "$out" "grok-regex" "the grok verdict names its isolated fallback source"
-  pass "grok still reads working through its isolated rendered-tail fallback"
+  # Grok 4.5 form (live 2026-08-02).
+  FM_FAKE_BUSY_TEXT='Shift+Tab:mode  │  Esc:cancel  │  Ctrl+x:shortcuts'
+  export FM_FAKE_BUSY_TEXT
+  out=$(run_crew_state "$d" feat-h3)
+  assert_contains "$out" "state: working" "grok 4.5 Esc:cancel busy footer -> working"
+  assert_contains "$out" "grok-regex" "the grok 4.5 verdict names its isolated fallback source"
+  # Idle 4.5 footer must not report working from the rendered tail alone.
+  FM_FAKE_BUSY_TEXT='Shift+Tab:mode  │  Ctrl+x:shortcuts'
+  export FM_FAKE_BUSY_TEXT
+  out=$(run_crew_state "$d" feat-h3)
+  assert_not_contains "$out" "state: working" "grok 4.5 idle footer must not read working"
+  pass "grok still reads working through both verified cancel-footer forms"
 }
 
 test_no_run_herdr_unknown_uses_backend_capture() {

@@ -247,12 +247,15 @@ fm_busy_record_read() {  # <state-dir> <id>
 }
 
 # fm_busy_grok_tail_busy: the Grok-only temporary rendered-tail fallback.
-# Consumes the tail on stdin; 0 when Grok's verified busy signature matches.
+# Consumes the tail on stdin; 0 when any verified Grok mid-turn cancel
+# keybind form matches. Forms are an ERE alternation owned with
+# FM_TMUX_GROK_BUSY_REGEX_DEFAULT in bin/fm-tmux-lib.sh (keep both in sync):
+# Ctrl+c:cancel (older) and Esc:cancel (Grok 4.5 / Build 0.2.118+).
 # FM_BUSY_REGEX still globally overrides the signature, mirroring the
 # historical operator escape hatch.
 fm_busy_grok_tail_busy() {
   grep -v '^[[:space:]]*$' | tail -12 \
-    | grep -qiE "${FM_BUSY_REGEX:-${FM_TMUX_GROK_BUSY_REGEX_DEFAULT:-Ctrl\\+c:cancel}}"
+    | grep -qiE "${FM_BUSY_REGEX:-${FM_TMUX_GROK_BUSY_REGEX_DEFAULT:-(Ctrl\\+c|Esc):cancel}}"
 }
 
 # fm_busy_classify: semantic classification for a task whose endpoint the
