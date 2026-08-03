@@ -1,17 +1,14 @@
 #!/usr/bin/env bash
-# Regression test for the fm-spawn.sh treehouse-get worktree-detection settle
-# loop (bin/fm-spawn.sh, the `for _ in $(seq 1 60)` loop after `treehouse get`).
+# Regression test for the fm-spawn.sh worktree-enter settle loop
+# (bin/fm-spawn.sh, the dual-read loop after durable lease + cd into the path).
 #
 # On some tmux/WSL setups a brand-new window's pane_current_path transiently
 # reports a stale, unrelated-but-real path on the very first poll, before the
-# pane actually settles into the worktree treehouse get moved it to. That stale
-# path still passes the loop's "differs from the project" check and
-# validate_spawn_worktree's "is a real, distinct worktree" check (it IS a real
-# git checkout, just the wrong one), so a naive single-read loop silently
-# records the wrong worktree= in state/<id>.meta. This test simulates that
+# pane actually settles into the leased worktree the spawn cds into. A naive
+# single-read loop could accept that stale path. This test simulates that
 # transient-then-settled pane_current_path sequence with a fake tmux and
-# asserts the recorded worktree resolves to the real, settled worktree, never
-# the stale first read.
+# asserts the recorded worktree resolves to the real, leased worktree, never
+# the stale first read, and that two consecutive matching reads are required.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -54,7 +51,30 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
-  fm_fake_exit0 "$fakebin" treehouse
+  # Durable lease acquire: print the settled worktree path (FM_FAKE_PANE_PATH)
+  # so spawn records that path, then waits for the pane to match it.
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  get)
+    shift
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --lease|--json) ;;
+        --lease-holder) shift ;;
+        --lease-holder=*) ;;
+      esac
+      shift || true
+    done
+    printf '%s\n' "${FM_FAKE_PANE_PATH:?FM_FAKE_PANE_PATH unset}"
+    exit 0
+    ;;
+  return) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 

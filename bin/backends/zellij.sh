@@ -383,15 +383,15 @@ fm_backend_zellij_target_ready() {  # <target> [expected-label]
 
 # fm_backend_zellij_current_path: the live pane's cwd, or empty on any error.
 # Mirrors tmux's pane_current_path poll used for worktree-path discovery after
-# `treehouse get`.
+# the spawn-time cd into a leased worktree.
 #
 # Verified pitfall (docs/zellij-backend.md "Worktree-path discovery: pane_cwd
 # does not track a subshell"): `list-panes --json`'s `pane_cwd` DOES reflect a
-# `cd` run directly in the pane's own top-level shell, but stays FROZEN at
-# whatever directory the pane's shell was in when it launched `treehouse get`
-# as a foreground command - it never follows that command's own internal `cd`
-# into the acquired worktree, even after the subshell is fully interactive and
-# a `pwd` typed into it prints the correct live path on screen. Zellij's CLI
+# `cd` run directly in the pane's own top-level shell (what fm-spawn uses after
+# a durable treehouse lease), but stays FROZEN at whatever directory the pane's
+# shell was in when it launched a nested foreground subshell - it never follows
+# that command's own internal `cd`, even after the subshell is fully interactive
+# and a `pwd` typed into it prints the correct live path on screen. Zellij's CLI
 # exposes no per-pane pid and no live-process cwd field to read instead
 # (unlike herdr's `foreground_cwd`), so passive JSON polling cannot solve
 # this. Active probe instead: print the pane's `$PWD` with a unique marker
@@ -462,8 +462,8 @@ fm_backend_zellij_send_key() {  # <target> <key> [expected-label]
 
 # fm_backend_zellij_send_text_line: send one line of TEXT then submit,
 # ATOMICALLY - mirrors tmux's `send-keys -t T text Enter` / herdr's `pane
-# run`. Used for the fixed spawn-time commands (treehouse get, the GOTMPDIR
-# export). Zellij has no single-call atomic "run and submit" action, so this
+# run`. Used for the fixed spawn-time commands (cd into the leased worktree,
+# the GOTMPDIR export). Zellij has no single-call atomic "run and submit" action, so this
 # composes paste (literal) + send-keys Enter, exactly like send_literal +
 # send_key are composed elsewhere - the two-step form is the ONLY form for
 # this adapter, unlike tmux/herdr which have a genuinely atomic primitive.
