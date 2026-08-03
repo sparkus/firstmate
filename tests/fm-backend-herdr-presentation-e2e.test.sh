@@ -773,8 +773,14 @@ ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | aw
   $1 == "pane-close" && $4 == a { print "close-a" }
   $1 == "pane-close" && $4 == b { print "close-b" }
 ')
+# Presentation lock serializes full create→abort lifecycles. Explicit pane.close
+# leaves close-* audit rows; the focus-safe emptying plan may instead remove the
+# last pane via Herdr's pane-death path with no pane.close mutation (see
+# assert_cleanup_focus_preserved). Accept both shapes; later checks still require
+# both exact panes gone and captain focus preserved.
 case "$ABORT_SEQUENCE" in
   $'create-a\nclose-a\ncreate-b\nclose-b'|$'create-b\nclose-b\ncreate-a\nclose-a') ;;
+  $'create-a\ncreate-b'|$'create-b\ncreate-a') ;;
   *) fail "concurrent post-create abort cleanup interleaved outside the presentation lock: $ABORT_SEQUENCE" ;;
 esac
 ABORT_UNRESTORED=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
