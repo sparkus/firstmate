@@ -74,9 +74,17 @@ git ls-files -s .claude/skills   # mode 120000 (symlink)
 
 Findings:
 
+- The supervising Claude session at `/Users/agwerschky/git/firstmate` loaded five project skills from the repository path during this task session: `ask-user-authority`, `secondmate-provisioning`, `stuck-crewmate-recovery`, `bootstrap-diagnostics`, and `harness-adapters`.
+- Each invocation returned the skill body.
+- Each skill resolves through `.claude/skills -> ../.agents/skills` to `.agents/skills/<name>/SKILL.md`, as confirmed by `readlink -f`.
+- This is a live load observation, not an inference from the symlink alone.
+- `ticket-queue-discipline` itself has not been loaded by a Claude session because it exists only on the feature branch and is not yet in the main home.
+- Claude project-skill resolution is observed for existing internal skills through the same symlink the new skill uses, and `ticket-queue-discipline` inherits that path.
+- A post-merge Claude load of `ticket-queue-discipline` is the remaining confirmation and must be performed after merge.
 - Claude project discovery is wired through `.claude/skills`, which is the long-standing tracked symlink to `../.agents/skills`.
 - In this linked worktree the symlink resolves and skill files are readable through it.
 - CI and CONTRIBUTING assert `[ "$(readlink .claude/skills)" = "../.agents/skills" ]` (and the same check for `.codex/skills` and `.grok/skills` after this branch).
+- These filesystem and CI checks support the wiring evidence but do not substitute for the runtime load observation above.
 
 ## Symlinks, worktrees, and clone
 
