@@ -6,9 +6,9 @@ This record supports the shared project-skill layout: `.agents/skills/` is the s
 It records what each harness actually resolved on the versions below.
 Task chronology stays in private reports or PR evidence.
 
-Verified 2026-08-03 in a linked git worktree of firstmate at
-`/Users/agwerschky/.treehouse/firstmate-87f082/1/firstmate`
-(`git rev-parse --show-toplevel` equals that path; `git-common-dir` points at the primary repo `.git`).
+Verified 2026-08-03 in the isolated firstmate worktree at
+`/Users/agwerschky/.no-mistakes/worktrees/e661563b090a/01KZ4B0458NGJFN2BJ5QTM3VFN`
+at commit `5939a39fbf2e52a6fe8e22a56d42cfdc2c8a65b0`.
 
 ## Versions
 
@@ -36,6 +36,21 @@ grok inspect --json
 # .agents/skills, .grok/skills, .claude/skills, and .codex/skills
 ```
 
+Relevant output for the new skill, after confirming that neither it nor `firstmate-coding-guidelines` existed under `~/.grok/skills`:
+
+```json
+{
+  "skill": {
+    "name": "ticket-queue-discipline",
+    "source": {
+      "type": "project",
+      "path": "/Users/agwerschky/.no-mistakes/worktrees/e661563b090a/01KZ4B0458NGJFN2BJ5QTM3VFN/.grok/skills/ticket-queue-discipline/SKILL.md"
+    },
+    "userInvocable": false
+  }
+}
+```
+
 Findings:
 
 - Project discovery works.
@@ -43,6 +58,7 @@ Findings:
 - Grok does **not** treat project `.codex/skills/` as a skill root (probe skill there never appeared).
 - With only the canonical `.agents/skills` tree present (before harness symlinks), every firstmate internal skill resolved as `source.type=project` with path under `.../firstmate/.agents/skills/<name>/SKILL.md`.
 - After adding `.grok/skills -> ../.agents/skills`, the same skills resolve once (name-deduped) with path under `.../firstmate/.grok/skills/<name>/SKILL.md`.
+- `firstmate-coding-guidelines` and `ticket-queue-discipline` were both absent from `~/.grok/skills`, so their observed `source.type=project` results did not come from user-level copies.
 - User-level skills still come from `~/.grok/skills/` (and optional Claude user compat paths).
 
 ### Codex
@@ -52,6 +68,13 @@ Commands:
 ```sh
 codex debug prompt-input "x"
 # parse the model-visible ## Skills / ### Skill roots section
+```
+
+Relevant model-visible output:
+
+```text
+- `r0` = `/Users/agwerschky/.no-mistakes/worktrees/e661563b090a/01KZ4B0458NGJFN2BJ5QTM3VFN/.agents/skills`
+- ticket-queue-discipline: Agent-only judgment for tracker-backed ticket work. Load before claiming, dispatching, closing, or auditing tickets in a project tracker so readiness, claims, and close reasons sta (file: r0/ticket-queue-discipline/SKILL.md)
 ```
 
 Findings:
@@ -67,26 +90,38 @@ Findings:
 Commands:
 
 ```sh
-readlink .claude/skills   # ../.agents/skills
-test -f .claude/skills/afk/SKILL.md
-git ls-files -s .claude/skills   # mode 120000 (symlink)
+claude -p --output-format stream-json --verbose --no-session-persistence \
+  --permission-mode dontAsk --tools Skill \
+  --debug-file /var/folders/bd/ky17fvwx45353ky4s2bg8ys80000gn/T/no-mistakes-evidence/01KZ4B0458NGJFN2BJ5QTM3VFN/claude-skill-debug.log \
+  --system-prompt 'Use the Skill tool when instructed. Do not use any other tool.' \
+  'Load the project skill ticket-queue-discipline. Then reply only: LOADED ticket-queue-discipline.'
+rg 'Loading skills from:|SkillTool returning' \
+  /var/folders/bd/ky17fvwx45353ky4s2bg8ys80000gn/T/no-mistakes-evidence/01KZ4B0458NGJFN2BJ5QTM3VFN/claude-skill-debug.log
 ```
 
 Findings:
 
-- The supervising Claude session at `/Users/agwerschky/git/firstmate` loaded five project skills from the repository path during this task session: `ask-user-authority`, `secondmate-provisioning`, `stuck-crewmate-recovery`, `bootstrap-diagnostics`, and `harness-adapters`.
-- Each invocation returned the skill body.
-- Each skill resolves through `.claude/skills -> ../.agents/skills` to `.agents/skills/<name>/SKILL.md`, as confirmed by `readlink -f`.
-- This is a live load observation, not an inference from the symlink alone.
-- `ticket-queue-discipline` itself has not been loaded by a Claude session because it exists only on the feature branch and is not yet in the main home.
-- Claude project-skill resolution is observed for existing internal skills through the same symlink the new skill uses, and `ticket-queue-discipline` inherits that path.
-- A post-merge Claude load of `ticket-queue-discipline` is the remaining confirmation and must be performed after merge.
-- Claude project discovery is wired through `.claude/skills`, which is the long-standing tracked symlink to `../.agents/skills`.
-- In this linked worktree the symlink resolves and skill files are readable through it.
+- Claude's debug log names the project skill root as this worktree's `.claude/skills` path.
+- The agent invoked `Skill` with `{"skill":"ticket-queue-discipline"}`.
+- The runtime returned `Launching skill: ticket-queue-discipline`, logged `SkillTool returning 2 newMessages for skill ticket-queue-discipline`, and the agent replied `LOADED ticket-queue-discipline.` with `subtype=success` and `is_error=false`.
+- This is a live load of the new skill in the feature worktree, not an inference from the symlink alone.
+- `.claude/skills -> ../.agents/skills` resolves that runtime root to the same canonical body used by Codex and Grok.
 - CI and CONTRIBUTING assert `[ "$(readlink .claude/skills)" = "../.agents/skills" ]` (and the same check for `.codex/skills` and `.grok/skills` after this branch).
 - These filesystem and CI checks support the wiring evidence but do not substitute for the runtime load observation above.
 
 ## Symlinks, worktrees, and clone
+
+The target commit records all three harness paths as git symlinks with the same link-target blob:
+
+```sh
+git ls-files -s .claude/skills .codex/skills .grok/skills
+```
+
+```text
+120000 2b7a412b8fa0fb7e985b0793321bd4e698f2b6cd 0	.claude/skills
+120000 2b7a412b8fa0fb7e985b0793321bd4e698f2b6cd 0	.codex/skills
+120000 2b7a412b8fa0fb7e985b0793321bd4e698f2b6cd 0	.grok/skills
+```
 
 Separate disposable git repo probe (not firstmate content):
 
