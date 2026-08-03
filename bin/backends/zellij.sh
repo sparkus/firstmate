@@ -52,17 +52,15 @@
 #      stdout, exactly as documented.
 #   4. `list-panes --json`'s `pane_cwd` reflects a `cd` run DIRECTLY in the
 #      pane's own top-level shell within one poll (<0.3s) - but does NOT
-#      reflect a `cd` performed by a NESTED SUBSHELL the pane's shell
-#      launched as a foreground command (verified: `treehouse get` opens
-#      exactly such a subshell). `pane_cwd` stays frozen at wherever the
-#      pane's shell was when it invoked that foreground command - worse than
-#      herdr's frozen-cwd trap (herdr at least exposes a `foreground_cwd`
-#      that tracks this; zellij's CLI exposes no live-process cwd field and
-#      no per-pane pid to read it from `/proc`/`lsof` either). This directly
-#      contradicts the design report's assumption ("acceptable for tmux and
-#      zellij") and required a different implementation strategy - see
-#      fm_backend_zellij_current_path below and docs/zellij-backend.md
-#      "Worktree-path discovery: pane_cwd does not track a subshell".
+#      reflect a `cd` performed by a NESTED SUBSHELL the pane's shell launched
+#      as a foreground command. `pane_cwd` stays frozen at wherever the pane's
+#      shell was when it invoked that command - worse than herdr's frozen-cwd
+#      trap (herdr at least exposes a `foreground_cwd` that tracks this;
+#      zellij's CLI exposes no live-process cwd field and no per-pane pid to
+#      read it from `/proc`/`lsof` either). The current leased-worktree path is
+#      entered with a top-level `cd`, while the active marker probe remains the
+#      authoritative entered-path check; see fm_backend_zellij_current_path
+#      below and docs/zellij-backend.md.
 #   5. `new-tab` DOES steal focus from an attached client with NO flag to
 #      suppress it (unlike herdr's --no-focus and tmux's new-window -d).
 #      Mitigated (fm_backend_zellij_create_task): capture the previously

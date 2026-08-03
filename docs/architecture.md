@@ -133,7 +133,8 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 ## Worktrees, not branches in your checkout
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
-Ship and scout treehouse worktrees are acquired with a durable lease held under the task id (`treehouse get --lease --lease-holder <id>`), so a parked or idle task's slot is never handed to a later `treehouse get` and never pruned until successful teardown returns it.
+Ship and scout treehouse worktrees are acquired with a durable lease held under the task id, so a parked or idle task's slot is never handed to a later acquisition and never pruned until successful teardown returns it.
+The [`fm-spawn.sh`](../bin/fm-spawn.sh) header owns the exact acquisition commands and flags.
 Recovery reuses a leased recorded path only when treehouse still reports that exact path leased under the task id, so returned or reassigned slots fail closed instead of being re-entered.
 Teardown serializes with recovery on the task lifecycle lock and records the lease as returned before any post-return endpoint cleanup can retain task metadata.
 Tasks spawned before durable ship leases remain usable without a lease marker: spawn reuses a still-present recorded path, and teardown's `treehouse return` still frees the slot when cleanup is allowed.

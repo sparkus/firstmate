@@ -87,8 +87,8 @@ A genuinely fresh surface returns an internal error from `read-screen` until som
 Target readiness therefore uses the structural `list-panes` response instead of a content read.
 Capture remains bounded and locally trimmed after `read-screen` becomes available.
 
-`current_directory` follows a top-level shell `cd` but not the foreground subshell opened by `treehouse get`.
-Spawn-time worktree discovery sends begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines.
+`current_directory` follows the top-level shell `cd` that enters a leased worktree but does not follow a nested foreground subshell.
+Spawn verifies the entered path with begin and end markers around `pwd`, captures the marked block, and joins wrapped path lines instead of depending on the structured field's narrower cwd model.
 
 Literal send and Enter are separate calls.
 Enter, Escape, and Ctrl-C are supported.
