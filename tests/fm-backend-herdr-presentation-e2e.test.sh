@@ -207,7 +207,22 @@ set -u
   done
   printf '\n'
 } >> "$TREEHOUSE_CALL_LOG"
+# Post-create abort fixture: after the Herdr endpoint exists, spawn leases a
+# path then confirms landing and isolation. Hand out the armed non-worktree
+# path for `get --lease` so landing can match the poisoned pane cwd and
+# isolation validation refuses with the expected message. Plain unleased get
+# still no-ops (legacy discovery path).
 if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
+  has_lease=0
+  for arg in "$@"; do
+    [ "$arg" = "--lease" ] && has_lease=1
+  done
+  if [ "$has_lease" -eq 1 ]; then
+    bad="$POST_CREATE_ABORT_CONTROL/not-a-worktree"
+    mkdir -p "$bad"
+    printf '%s\n' "$bad"
+    exit 0
+  fi
   exit 0
 fi
 exec "$REAL_TREEHOUSE" "$@"
