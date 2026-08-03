@@ -2,8 +2,9 @@
 # Tear down a finished task: return the treehouse worktree, release the Orca
 # worktree, or retire a secondmate home; kill the recorded runtime endpoint,
 # clear volatile state, refresh/prune the project's clone for PR-based ship
-# tasks, then print a backlog-refresh reminder for ship and scout teardowns
-# (a secondmate teardown prints none, since secondmates are not backlog items).
+# tasks, then print a backlog-refresh reminder and emit a durable completion
+# refill wake for ship and scout teardowns (a secondmate teardown prints none
+# and emits no refill, since secondmates are not backlog items).
 # REFUSES if the worktree holds work that has not LANDED, because cleanup
 # hard-resets/removes the worktree and kills its processes. Work has landed when it is
 # reachable from any remote-tracking branch (a fork counts as a remote, so
@@ -110,6 +111,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-refill-lib.sh
+. "$SCRIPT_DIR/fm-refill-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -1547,3 +1550,11 @@ if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only 
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"
 backlog_refresh_reminder
+# Durable refill: the printed reminder above is not enough on its own - a long
+# supervising turn can land work and never reach claim-next. Emit once per task
+# (idempotent across merge-poll + teardown + re-escalation) so the wake queue
+# surfaces refill without relying on agent memory. Floor check is independent.
+if [ "$KIND" != secondmate ]; then
+  fm_refill_emit_completion "$ID" || true
+  fm_refill_emit_floor_if_needed || true
+fi

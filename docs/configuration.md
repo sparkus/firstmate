@@ -23,6 +23,19 @@ Wake, watcher, away-mode, and X-specific state mechanics remain with their named
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Ship concurrency floor (config/concurrency-floor)
+
+`config/concurrency-floor` is an optional local, gitignored file under the effective Firstmate home that sets a target number of concurrent live ship workers for that home.
+The file is one non-negative base-10 integer on a single line; only a positive integer enables the floor.
+An absent, unreadable, symlinked, empty, zero, or non-numeric value means the floor is off.
+When the floor is on and the count of live `kind=ship` metadata records in `state/` drops below the target, `bin/fm-refill-lib.sh` enqueues one durable `check: refill floor:` wake so the supervising agent runs the normal claim-and-dispatch procedure.
+The floor is independent of completion-triggered refill (merge-poll and teardown).
+Both paths exist so a missed rule cannot starve the queue.
+Neither path spawns work: they only surface the signal.
+Until ship worktree leases protect pool slots, a floor or completion refill payload may include a hold when any live non-`local-only` ship worktree still has unpushed commits.
+Coordinate with that lease work rather than reimplementing pool protection here.
+This preference is per home and is not part of secondmate inherited configuration.
+
 ## Pi Calm preference (config/calm)
 
 The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.
