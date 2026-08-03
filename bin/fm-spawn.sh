@@ -262,6 +262,8 @@ fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+# Armed only before metadata publication, when no worker-owned work can exist;
+# abort cleanup may release only the lease held by this task id.
 TREEHOUSE_LEASE_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
@@ -339,12 +341,14 @@ spawn_abort_cleanup() {
       fi
     fi
   fi
-  # A lease taken before metadata publication is released on abort so a failed
-  # spawn does not leave a durable pool reservation with no owner record.
+  # Release is forbidden wherever work might exist: a refused teardown may hold
+  # unpushed work and never reaches this path. Failed spawn before metadata
+  # publication is the explicit exception because no task owns recorded work;
+  # retaining that lease would permanently reserve a slot no task can claim.
   if [ "$TREEHOUSE_LEASE_ABORT_CLEANUP" = 1 ] && [ -n "${WT:-}" ] && [ -n "${PROJ_ABS:-}" ]; then
     TREEHOUSE_LEASE_ABORT_CLEANUP=0
     if command -v treehouse >/dev/null 2>&1; then
-      ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) >/dev/null 2>&1 || \
+      ( cd "$PROJ_ABS" && treehouse return --force --if-lease-holder "$ID" "$WT" ) >/dev/null 2>&1 || \
         echo "warning: failed to return leased worktree $WT after aborted spawn; lease may still be held" >&2
     fi
   fi

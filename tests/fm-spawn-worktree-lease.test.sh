@@ -79,9 +79,12 @@ case "${1:-}" in
   return)
     shift
     target=
+    holder=
     while [ $# -gt 0 ]; do
       case "$1" in
         --force) ;;
+        --if-lease-holder) shift; holder=${1:-} ;;
+        --if-lease-holder=*) holder=${1#--if-lease-holder=} ;;
         *) target=$1 ;;
       esac
       shift || true
@@ -89,7 +92,12 @@ case "${1:-}" in
     [ -n "$target" ] || exit 1
     pool=${FM_FAKE_TREEHOUSE_POOL:?}
     mkdir -p "$pool/.leases"
-    rm -f -- "$(lease_file "$target")"
+    lf=$(lease_file "$target")
+    if [ -n "$holder" ]; then
+      [ -f "$lf" ] || exit 1
+      [ "$(cat "$lf")" = "$holder" ] || exit 1
+    fi
+    rm -f -- "$lf"
     exit 0
     ;;
 esac
@@ -372,9 +380,39 @@ SH
   pass "concurrent distinct-task spawns both succeed with distinct leased slots"
 }
 
+# --- 5. Failed spawn abort releases only its task-owned lease ----------------
+
+test_aborted_spawn_releases_only_own_lease() {
+  local rec out status other_lease own_lease
+  rec=$(make_home_case abort-holder-scope)
+  read_case "$rec"
+  other_lease="$POOL_DIR/.leases/slot-1"
+  own_lease="$POOL_DIR/.leases/slot-2"
+  printf 'other-holder\n' > "$other_lease"
+  fm_fake_exit0 "$FAKEBIN_DIR" sleep
+
+  out=$(run_spawn_pool "$HOME_DIR" "$PROJ_DIR" "$FAKEBIN_DIR" "$TH_LOG" "$POOL_DIR" \
+    lease-abort-d4 "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn should abort when the pane never reaches its leased worktree"$'\n'"$out"
+  assert_contains "$out" "worker did not enter leased worktree" \
+    "spawn did not fail at leased-worktree landing"
+  [ ! -e "$HOME_DIR/state/lease-abort-d4.meta" ] \
+    || fail "aborted spawn published metadata"
+  [ ! -e "$own_lease" ] || fail "aborted spawn left its own lease held"
+  [ -f "$other_lease" ] || fail "aborted spawn released another holder's lease"
+  [ "$(cat "$other_lease")" = other-holder ] \
+    || fail "aborted spawn changed another holder's lease"
+  grep -F "treehouse return --force --if-lease-holder lease-abort-d4 $POOL_DIR/slot-2" \
+    "$TH_LOG" >/dev/null \
+    || fail "abort cleanup did not scope return to the spawning task's lease"
+  pass "failed spawn abort releases only its task-owned lease"
+}
+
 test_lease_excludes_slot_from_plain_get
 test_successful_teardown_releases_lease
 test_refused_teardown_keeps_lease
 test_concurrent_distinct_spawns_both_succeed
+test_aborted_spawn_releases_only_own_lease
 
 echo "# all fm-spawn-worktree-lease tests passed"
