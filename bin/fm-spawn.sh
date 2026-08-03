@@ -283,6 +283,8 @@ HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
+SPAWN_HOME_BOUNDARY=
+SPAWN_HOME_BOUNDARY_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -377,6 +379,10 @@ spawn_abort_cleanup() {
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
   fi
+  if [ "$SPAWN_HOME_BOUNDARY_HELD" = 1 ]; then
+    SPAWN_HOME_BOUNDARY_HELD=0
+    fm_lock_release "$SPAWN_HOME_BOUNDARY" || true
+  fi
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
@@ -449,12 +455,26 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+SPAWN_HOME_BOUNDARY=$(fm_home_retirement_lock_path "$FM_HOME") || {
+  echo "error: could not resolve task home boundary for $FM_HOME; refusing spawn $ID" >&2
+  exit 1
+}
+if ! fm_lock_try_acquire "$SPAWN_HOME_BOUNDARY"; then
+  echo "error: task home retirement is already handling $FM_HOME; refusing spawn $ID" >&2
+  exit 1
+fi
+SPAWN_HOME_BOUNDARY_HELD=1
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   echo "error: another spawn is already creating task $ID" >&2
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
+fm_lock_release "$SPAWN_HOME_BOUNDARY" || {
+  echo "error: could not release task home boundary for $FM_HOME; refusing spawn $ID" >&2
+  exit 1
+}
+SPAWN_HOME_BOUNDARY_HELD=0
 PROJ=
 ARG3=
 FIRSTMATE_HOME=

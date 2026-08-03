@@ -87,6 +87,12 @@ case "${1:-}" in
       esac
       shift
     done
+    if [ -n "${FM_FAKE_TREEHOUSE_RETURN_ENTERED:-}" ]; then
+      : > "$FM_FAKE_TREEHOUSE_RETURN_ENTERED"
+      while [ ! -e "${FM_FAKE_TREEHOUSE_RETURN_RELEASE:?}" ]; do
+        sleep 0.01
+      done
+    fi
     [ -z "${FM_FAKE_TREEHOUSE_RETURN_FAIL:-}" ] || exit 17
     [ -n "${FM_FAKE_TREEHOUSE_LEASE_FILE:-}" ] && rm -f "$FM_FAKE_TREEHOUSE_LEASE_FILE"
     [ -n "$target" ] && rm -rf -- "$target"

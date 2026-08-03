@@ -125,6 +125,14 @@ fm_lock_abs_path() {
   printf '%s/%s\n' "$dir" "$base"
 }
 
+fm_home_retirement_lock_path() {  # <home>
+  local home=$1 home_real home_parent home_name
+  home_real=$(cd "$home" 2>/dev/null && pwd -P) || return 1
+  home_parent=$(dirname "$home_real")
+  home_name=$(basename "$home_real")
+  printf '%s/.fm-home-retirement-%s.lock\n' "$home_parent" "$home_name"
+}
+
 fm_lock_owner_dir() {
   local lockdir=$1 lock_abs
   lock_abs=$(fm_lock_abs_path "$lockdir") || return 1

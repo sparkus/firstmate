@@ -132,8 +132,9 @@ META="$STATE/$ID.meta"
 TEARDOWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 TEARDOWN_TASK_LOCK_HELD=0
 TEARDOWN_CHILD_TASK_LOCKS=
+TEARDOWN_HOME_RETIREMENT_LOCKS=
 teardown_release_task_lock() {
-  local child_lock
+  local child_lock home_lock
   if [ -n "$TEARDOWN_CHILD_TASK_LOCKS" ]; then
     while IFS= read -r child_lock; do
       [ -n "$child_lock" ] || continue
@@ -142,6 +143,15 @@ teardown_release_task_lock() {
 $TEARDOWN_CHILD_TASK_LOCKS
 FMEOF
     TEARDOWN_CHILD_TASK_LOCKS=
+  fi
+  if [ -n "$TEARDOWN_HOME_RETIREMENT_LOCKS" ]; then
+    while IFS= read -r home_lock; do
+      [ -n "$home_lock" ] || continue
+      fm_lock_release "$home_lock" || true
+    done <<FMEOF
+$TEARDOWN_HOME_RETIREMENT_LOCKS
+FMEOF
+    TEARDOWN_HOME_RETIREMENT_LOCKS=
   fi
   if [ "$TEARDOWN_TASK_LOCK_HELD" = 1 ]; then
     TEARDOWN_TASK_LOCK_HELD=0
@@ -1172,26 +1182,72 @@ FMEOF
   return 1
 }
 
+teardown_home_retirement_lock_held() {  # <lock-path>
+  local wanted=$1 held
+  [ -n "$TEARDOWN_HOME_RETIREMENT_LOCKS" ] || return 1
+  while IFS= read -r held; do
+    [ "$held" != "$wanted" ] || return 0
+  done <<FMEOF
+$TEARDOWN_HOME_RETIREMENT_LOCKS
+FMEOF
+  return 1
+}
+
+teardown_home_retirement_lock_acquire() {  # <home>
+  local home=$1 lock_path
+  lock_path=$(fm_home_retirement_lock_path "$home") || {
+    echo "error: could not resolve retirement boundary for child home $home" >&2
+    return 1
+  }
+  teardown_home_retirement_lock_held "$lock_path" && return 0
+  if ! fm_lock_try_acquire "$lock_path"; then
+    echo "error: task activity is already using child home $home; refusing retirement" >&2
+    return 1
+  fi
+  if [ -n "$TEARDOWN_HOME_RETIREMENT_LOCKS" ]; then
+    TEARDOWN_HOME_RETIREMENT_LOCKS="$TEARDOWN_HOME_RETIREMENT_LOCKS
+$lock_path"
+  else
+    TEARDOWN_HOME_RETIREMENT_LOCKS=$lock_path
+  fi
+}
+
+teardown_child_task_lock_acquire() {  # <lock-path> <task-id>
+  local lock_path=$1 task_id=$2
+  teardown_child_task_lock_held "$lock_path" && return 0
+  if ! fm_lock_try_acquire "$lock_path"; then
+    echo "error: another spawn or teardown is already handling child task $task_id" >&2
+    return 1
+  fi
+  if [ -n "$TEARDOWN_CHILD_TASK_LOCKS" ]; then
+    TEARDOWN_CHILD_TASK_LOCKS="$TEARDOWN_CHILD_TASK_LOCKS
+$lock_path"
+  else
+    TEARDOWN_CHILD_TASK_LOCKS=$lock_path
+  fi
+}
+
 lock_firstmate_home_children() {  # <home>
-  local home=$1 sub_state child_meta child_id child_lock child_kind child_wt child_home
+  local home=$1 sub_state active_lock child_meta child_id child_lock child_kind child_wt child_home
   sub_state="$home/state"
+  teardown_home_retirement_lock_acquire "$home" || return 1
   [ -d "$sub_state" ] || return 0
+  for active_lock in "$sub_state"/.spawn-*.lock; do
+    [ -e "$active_lock" ] || [ -L "$active_lock" ] || continue
+    child_id=$(basename "$active_lock")
+    child_id=${child_id#.spawn-}
+    child_id=${child_id%.lock}
+    fm_task_id_path_safe "$child_id" || {
+      echo "error: invalid child task lock under $sub_state; refusing retirement" >&2
+      return 1
+    }
+    teardown_child_task_lock_acquire "$active_lock" "$child_id" || return 1
+  done
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
     child_lock="$sub_state/.spawn-$child_id.lock"
-    if ! teardown_child_task_lock_held "$child_lock"; then
-      if ! fm_lock_try_acquire "$child_lock"; then
-        echo "error: another spawn or teardown is already handling child task $child_id" >&2
-        return 1
-      fi
-      if [ -n "$TEARDOWN_CHILD_TASK_LOCKS" ]; then
-        TEARDOWN_CHILD_TASK_LOCKS="$TEARDOWN_CHILD_TASK_LOCKS
-$child_lock"
-      else
-        TEARDOWN_CHILD_TASK_LOCKS=$child_lock
-      fi
-    fi
+    teardown_child_task_lock_acquire "$child_lock" "$child_id" || return 1
     [ -e "$child_meta" ] || continue
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
@@ -1212,6 +1268,10 @@ validate_firstmate_home_children_removal() {
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
+    teardown_child_task_lock_held "$sub_state/.spawn-$child_id.lock" || {
+      echo "error: child task lock is not held for $child_id; refusing retirement" >&2
+      return 1
+    }
     treehouse_lease_metadata_validate "$child_meta" "$child_id" "child task" || return 1
     child_lease_state=$TREEHOUSE_META_STATE
     fm_backend_validate_task_endpoint "$child_meta" "$child_id" || return 1
@@ -1366,6 +1426,10 @@ preflight_firstmate_home_herdr_children() {  # <home>
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
+    teardown_child_task_lock_held "$sub_state/.spawn-$child_id.lock" || {
+      echo "error: child task lock is not held for $child_id; refusing retirement" >&2
+      return 1
+    }
     fm_backend_validate_task_endpoint "$child_meta" "$child_id" || return 1
     child_backend=$FM_BACKEND_VALIDATED_BACKEND
     child_target=$FM_BACKEND_VALIDATED_TARGET
@@ -1390,6 +1454,10 @@ cleanup_firstmate_home_children() {
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
+    teardown_child_task_lock_held "$sub_state/.spawn-$child_id.lock" || {
+      echo "error: child task lock is not held for $child_id; refusing retirement" >&2
+      return 1
+    }
     treehouse_lease_metadata_validate "$child_meta" "$child_id" "child task" || return 1
     child_lease_holder=$TREEHOUSE_META_HOLDER
     child_lease_state=$TREEHOUSE_META_STATE
@@ -1506,8 +1574,8 @@ validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
   validate_firstmate_home_for_removal "$HOME_PATH" "secondmate home" "$ID" >/dev/null || exit 1
+  lock_firstmate_home_children "$HOME_PATH" || exit 1
   if [ "$FORCE" = "--force" ]; then
-    lock_firstmate_home_children "$HOME_PATH" || exit 1
     validate_firstmate_home_children_removal "$HOME_PATH" || exit 1
     if [ "$BACKEND" = herdr ]; then
       teardown_herdr_preflight_target "$T" "$ID" || exit 1
@@ -1521,6 +1589,11 @@ if [ "$KIND" = secondmate ] && [ "$FORCE" != "--force" ]; then
   if [ -d "$SUB_STATE" ]; then
     for child_meta in "$SUB_STATE"/*.meta; do
       [ -e "$child_meta" ] || continue
+      child_id=$(basename "$child_meta" .meta)
+      teardown_child_task_lock_held "$SUB_STATE/.spawn-$child_id.lock" || {
+        echo "error: child task lock is not held for $child_id; refusing retirement" >&2
+        exit 1
+      }
       echo "REFUSED: secondmate $ID still has in-flight work in $SUB_STATE." >&2
       echo "Found $(basename "$child_meta"). Let that home finish or explicitly discard with --force." >&2
       exit 1

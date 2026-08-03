@@ -1701,6 +1701,122 @@ test_secondmate_force_teardown_respects_child_task_lock() {
   pass "secondmate forced cleanup shares each child task lifecycle lock"
 }
 
+test_secondmate_retirement_refuses_metadata_free_child_lock() {
+  local home subhome fakebin log err entered release holder_pid rc i
+  home="$TMP_ROOT/metadata-free-child-lock-home"
+  subhome="$TMP_ROOT/metadata-free-child-lock-subhome"
+  err="$TMP_ROOT/metadata-free-child-lock.err"
+  entered="$TMP_ROOT/metadata-free-child-lock.entered"
+  release="$TMP_ROOT/metadata-free-child-lock.release"
+  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_write_meta "$home/state/domain.meta" \
+    'window=firstmate:fm-domain' "worktree=$subhome" "project=$subhome" \
+    'harness=echo' 'kind=secondmate' 'mode=secondmate' 'yolo=off' \
+    "home=$subhome" 'projects=alpha'
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  fakebin=$(make_fake_tmux "$TMP_ROOT/metadata-free-child-lock-fake")
+  log="$TMP_ROOT/metadata-free-child-lock-fake/tmux.log"
+
+  FM_STATE_OVERRIDE="$subhome/state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 1
+    : > "$3"
+    while [ ! -e "$4" ]; do sleep 0.01; done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$subhome/state/.spawn-newcomer.lock" "$entered" "$release" &
+  holder_pid=$!
+  i=0
+  while [ ! -e "$entered" ] && [ "$i" -lt 200 ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$entered" ] || {
+    : > "$release"
+    wait "$holder_pid" || true
+    fail "metadata-free child task lock fixture did not acquire its lock"
+  }
+
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/metadata-free-child-lock-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain >/dev/null 2>"$err"
+  rc=$?
+  set -e
+  : > "$release"
+  wait "$holder_pid"
+
+  [ "$rc" -ne 0 ] || fail "secondmate retirement ignored a metadata-free child task lock"
+  grep -F 'another spawn or teardown is already handling child task newcomer' "$err" >/dev/null \
+    || fail "secondmate retirement did not explain metadata-free child task activity"
+  [ -d "$subhome" ] || fail "secondmate retirement removed a home under a metadata-free child spawn"
+  [ -e "$home/state/domain.meta" ] || fail "secondmate retirement removed parent metadata under a metadata-free child spawn"
+  grep -F 'kill-window' "$log" >/dev/null && fail "secondmate retirement killed an endpoint before excluding metadata-free child activity"
+  pass "secondmate retirement detects metadata-free child lifecycle locks"
+}
+
+test_secondmate_retirement_blocks_new_child_spawn() {
+  local home subhome childproj childwt newwt fakebin log entered release teardown_out teardown_pid spawn_out spawn_rc meta_published i
+  home="$TMP_ROOT/retirement-boundary-home"
+  subhome="$TMP_ROOT/retirement-boundary-subhome"
+  childproj="$subhome/projects/alpha"
+  childwt="$TMP_ROOT/retirement-boundary-child-worktree"
+  newwt="$TMP_ROOT/retirement-boundary-new-worktree"
+  entered="$TMP_ROOT/retirement-boundary.entered"
+  release="$TMP_ROOT/retirement-boundary.release"
+  teardown_out="$TMP_ROOT/retirement-boundary.teardown"
+  mkdir -p "$home/state" "$home/data" "$subhome/state"
+  fm_git_worktree "$childproj" "$childwt" retirement-boundary-child
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_write_meta "$home/state/domain.meta" \
+    'window=firstmate:fm-domain' "worktree=$subhome" "project=$subhome" \
+    'harness=echo' 'kind=secondmate' 'mode=secondmate' 'yolo=off' \
+    "home=$subhome" 'projects=alpha'
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  fm_write_meta "$subhome/state/child.meta" \
+    'window=firstmate:fm-child' "worktree=$childwt" "project=$childproj" \
+    'harness=echo' 'kind=ship' 'mode=no-mistakes' 'yolo=off'
+  fakebin=$(make_fake_tmux "$TMP_ROOT/retirement-boundary-fake")
+  log="$TMP_ROOT/retirement-boundary-fake/tmux.log"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/retirement-boundary-fake/pane.txt" \
+    FM_FAKE_TREEHOUSE_RETURN_ENTERED="$entered" FM_FAKE_TREEHOUSE_RETURN_RELEASE="$release" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >"$teardown_out" 2>&1 &
+  teardown_pid=$!
+  i=0
+  while [ ! -e "$entered" ] && [ "$i" -lt 200 ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$entered" ] || {
+    : > "$release"
+    wait "$teardown_pid" || true
+    fail "parent teardown did not reach its blocked child return: $(cat "$teardown_out")"
+  }
+
+  set +e
+  spawn_out=$(PATH="$fakebin:$PATH" FM_HOME="$subhome" FM_SPAWN_NO_GUARD=1 \
+    FM_FAKE_TMUX_LOG="$log" FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/retirement-boundary-fake/pane.txt" \
+    FM_FAKE_TREEHOUSE_HOME="$newwt" \
+    "$ROOT/bin/fm-spawn.sh" newcomer "$childproj" codex 2>&1)
+  spawn_rc=$?
+  set -e
+  meta_published=0
+  [ ! -e "$subhome/state/newcomer.meta" ] || meta_published=1
+  : > "$release"
+  wait "$teardown_pid" || fail "parent teardown failed after releasing child return: $(cat "$teardown_out")"
+
+  [ "$spawn_rc" -ne 0 ] || fail "new child spawn entered a home while parent retirement was active"
+  assert_contains "$spawn_out" "task home retirement is already handling $subhome" \
+    "new child spawn did not explain the active home retirement boundary"
+  grep -F 'treehouse get --lease --lease-holder newcomer' "$log" >/dev/null \
+    && fail "new child spawn leased a worktree after parent retirement began"
+  [ "$meta_published" -eq 0 ] || fail "new child spawn published metadata during parent retirement"
+  [ ! -e "$newwt" ] || fail "new child spawn created a worktree during parent retirement"
+  pass "secondmate retirement blocks new child spawns before leasing"
+}
+
 test_secondmate_force_teardown_fails_closed_on_leased_child_return() {
   local home subhome childproj childwt fakebin log err rc
   home="$TMP_ROOT/force-leased-child-home"
@@ -2517,6 +2633,8 @@ test_secondmate_teardown_refuses_failed_leased_home_return
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_force_teardown_discards_child_work
 test_secondmate_force_teardown_respects_child_task_lock
+test_secondmate_retirement_refuses_metadata_free_child_lock
+test_secondmate_retirement_blocks_new_child_spawn
 test_secondmate_force_teardown_fails_closed_on_leased_child_return
 test_secondmate_force_teardown_refuses_child_quarantine_symlink
 test_secondmate_force_teardown_preserves_child_on_unproven_lock
