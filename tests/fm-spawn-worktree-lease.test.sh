@@ -292,6 +292,17 @@ run_teardown() {
     "$TEARDOWN" "$id" "$@" 2>&1
 }
 
+probe_home_retirement() {
+  local home=$1
+  FM_WAKE_DEFER_STATE_INIT=1 STATE="$home/state" bash -c '
+    set -eu
+    . "$1"
+    fm_home_retirement_begin "$2" || exit 1
+    retiring=$FM_HOME_RETIREMENT_REGISTRATION
+    fm_home_retirement_end "$retiring"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home"
+}
+
 lease_holder_file() {
   local holder=$1
   printf '%s\n' "$POOL_DIR/leases/$holder"
@@ -390,6 +401,47 @@ test_parallel_distinct_spawns_share_home() {
       && fail "parallel spawn $id was misclassified as retirement"
   done
   pass "six distinct tasks spawn concurrently under one home"
+}
+
+test_retirement_rejected_until_meta_publication() {
+  local rec entered release spawn_out spawn_pid spawn_status retirement_status i meta_before
+  rec=$(make_lease_case prepublication-registration ship-lease-j10)
+  read_lease_case "$rec"
+  entered="$CASE_DIR/get-entered"
+  release="$CASE_DIR/get-release"
+  spawn_out="$CASE_DIR/spawn.out"
+  mkdir -p "$entered"
+
+  FM_FAKE_TREEHOUSE_GET_ENTERED_DIR="$entered" \
+    FM_FAKE_TREEHOUSE_GET_RELEASE="$release" \
+    run_spawn "$TASK_ID" > "$spawn_out" 2>&1 &
+  spawn_pid=$!
+  i=0
+  while [ ! -e "$entered/$TASK_ID" ] && [ "$i" -lt 500 ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$entered/$TASK_ID" ] || {
+    : > "$release"
+    wait "$spawn_pid" || true
+    fail "spawn did not reach blocked pre-publication lease acquisition: $(cat "$spawn_out")"
+  }
+  meta_before=0
+  [ ! -e "$HOME_DIR/state/$TASK_ID.meta" ] || meta_before=1
+  if probe_home_retirement "$HOME_DIR" >/dev/null 2>&1; then
+    retirement_status=0
+  else
+    retirement_status=$?
+  fi
+  : > "$release"
+  wait "$spawn_pid"
+  spawn_status=$?
+
+  [ "$meta_before" -eq 0 ] || fail "spawn published metadata before the blocked lease acquisition completed"
+  [ "$retirement_status" -ne 0 ] || fail "retirement began while spawn registration lacked durable metadata"
+  expect_code 0 "$spawn_status" "spawn failed after pre-publication retirement probe"$'\n'"$(cat "$spawn_out")"
+  [ -f "$HOME_DIR/state/$TASK_ID.meta" ] || fail "spawn did not publish metadata after retirement probe"
+  pass "retirement cannot begin before spawn metadata publication"
 }
 
 test_spawn_lease_blocks_second_get() {
@@ -628,6 +680,8 @@ test_failed_meta_publication_returns_fresh_lease() {
   if find "$HOME_DIR/state" -maxdepth 1 -name ".${TASK_ID}.meta.*" -print | grep . >/dev/null; then
     fail "failed publication left a temporary metadata file"
   fi
+  probe_home_retirement "$HOME_DIR" >/dev/null 2>&1 \
+    || fail "failed metadata publication left an active home registration"
   pass "failed metadata publication is atomic and returns its fresh lease"
 }
 
@@ -724,6 +778,7 @@ test_legacy_unleased_worktree_spawn_and_teardown() {
 }
 
 test_parallel_distinct_spawns_share_home
+test_retirement_rejected_until_meta_publication
 test_spawn_lease_blocks_second_get
 test_successful_teardown_releases_lease
 test_refused_teardown_keeps_lease

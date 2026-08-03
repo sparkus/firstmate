@@ -476,11 +476,6 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
-fm_home_spawn_unregister "$SPAWN_HOME_REGISTRATION" || {
-  echo "error: could not finish spawn registration for $ID under $FM_HOME" >&2
-  exit 1
-}
-SPAWN_HOME_REGISTRATION_HELD=0
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -1801,6 +1796,11 @@ META_TMP=
 # Meta now owns the worktree path; abort must not release a successfully
 # published ship/scout lease (teardown is the only release path).
 TREEHOUSE_LEASE_ACQUIRED=0
+fm_home_spawn_unregister "$SPAWN_HOME_REGISTRATION" || {
+  echo "error: could not finish spawn registration for $ID under $FM_HOME" >&2
+  exit 1
+}
+SPAWN_HOME_REGISTRATION_HELD=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
