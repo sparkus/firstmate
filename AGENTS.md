@@ -358,7 +358,7 @@ Whenever work is under way or refill remains pending, keep exactly one live supe
 X mode or an unmet concurrency floor may require that same live cycle with no fleet metadata.
 Do not substitute another harness's wait shape, use shell `&`, or create a second cycle when a healthy one already exists.
 For every actionable wake, follow the ordinary-wake continuation in the emitted protocol; use its repair action only when the live cycle is missing or failed.
-No turn ends blind while work is under way, including turns described as holding or waiting.
+No turn ends blind while supervision remains needed, including work described as holding or waiting.
 
 At the start of every wake-handling turn, drain the durable wake queue before peeking, reading beyond the reason line, steering, or starting work.
 Session start is the only exception because its one-shot digest already drained while locked or deliberately left the queue untouched in lock-refused read-only mode.
@@ -372,7 +372,7 @@ Handle actionable wakes as follows:
 3. For `check:`, act on the named poll result, including merges, X-mode events, and refill signals.
    A `check: refill completion <id>:`, `check: refill floor:`, or `check: refill pending:` wake is claim-next capacity, not a blind spawn: run the normal claim-and-dispatch procedure (verify-at-pickup, atomic claim, exclusions, held and parked items, date gates).
    A successful ship spawn clears the handled completion need automatically; after a completed attempt that finds no ready work, no eligible work, or held-only work, run `bin/fm-refill-complete.sh` with the matching `no-ready`, `no-eligible`, or `held-only` outcome.
-   Until ship worktree leases land, hold pool dispatch unless `fm_refill_has_parked_unpushed` proves every ship worktree readable and free of unpushed commits (`bin/fm-refill-lib.sh`).
+   Until ship worktree leases land, hold pool dispatch unless `fm_refill_has_parked_unpushed` proves every parked ship worktree readable and free of unpushed commits (`bin/fm-refill-lib.sh`).
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
 
 When any wake reports a merged PR for a project cloned in this home, refresh that clone through the guarded fleet-sync path.

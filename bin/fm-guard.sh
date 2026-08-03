@@ -140,27 +140,26 @@ if [ -n "$tangle_branch" ]; then
   } >&2
 fi
 
-# Compute in-flight count and watcher-beacon freshness via the shared
-# grace-based predicate (bin/fm-supervision-lib.sh). Only act with tasks in
-# flight; count them so the banner can say how much is riding on an absent
-# watcher.
+# Compute fleet, relay, and refill supervision need plus watcher-beacon freshness
+# through the shared grace-based predicate (bin/fm-supervision-lib.sh). Keep the
+# in-flight count so the banner can say how much is riding on an absent watcher.
 fm_supervision_status "$STATE" "$GRACE"
 in_flight=$FM_SUP_IN_FLIGHT
 watcher_fresh=$FM_SUP_WATCHER_FRESH
 beacon_desc=$FM_SUP_BEACON_DESC
 if [ "$FM_SUP_NEEDED" = false ]; then
-  # Leave the unhealthy state (no work riding on the watcher): clear so a later
-  # in-flight + stale combination is a fresh episode even if the beacon is still
-  # absent with the same key string.
+  # Leave the unhealthy state (no supervision need): clear so a later need plus
+  # stale watcher is a fresh episode even if the beacon is still absent with the
+  # same key string.
   [ "$READ_ONLY" -eq 1 ] || fm_guard_clear_stale_banner
   exit 0
 fi
 
 [ -s "$FM_WAKE_QUEUE" ] && queue_pending=true
 
-# No fresh watcher with tasks in flight is the dangerous state: emit a prominent,
-# bordered banner FIRST so it reads as an alarm, not a buried stderr line. Later
-# calls in the same episode get a one-line reminder only.
+# A supervision need with no fresh watcher is the dangerous state: emit a
+# prominent, bordered banner FIRST so it reads as an alarm, not a buried stderr
+# line. Later calls in the same episode get a one-line reminder only.
 if [ "$watcher_fresh" = false ]; then
   episode_key=$(fm_guard_stale_episode_key "$STATE")
   episode_key=${episode_key%$'\n'}
@@ -208,14 +207,15 @@ if [ "$watcher_fresh" = false ]; then
       "$beacon_desc" "$GRACE" >&2
   fi
 else
-  # Healthy again while work is still in flight: end the episode so a later
+  # Healthy again while supervision remains needed: end the episode so a later
   # restale re-prints the full banner.
   [ "$READ_ONLY" -eq 1 ] || fm_guard_clear_stale_banner
 fi
 
-# Queued wakes are an independent hazard; warn whenever they are pending, even if
-# a watcher is alive. Kept after the banner so the no-watcher alarm reads first.
-# Dedup of the watcher-down banner never suppresses this warning.
+# Queued wakes are independent of watcher freshness; while supervision remains
+# needed, warn whenever they are pending even if a watcher is alive. Keep this
+# after the banner so the no-watcher alarm reads first. Dedup of the watcher-down
+# banner never suppresses this warning.
 if "$queue_pending"; then
   if [ "$READ_ONLY" -eq 1 ]; then
     echo "WARNING: queued wakes pending - left untouched because this session lacks verified fleet-lock ownership." >&2
