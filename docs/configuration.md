@@ -28,7 +28,7 @@ Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, whil
 `config/concurrency-floor` is an optional local, gitignored file under the effective Firstmate home that sets a target number of concurrent live ship workers for that home.
 The file is one non-negative base-10 integer on a single line; only a positive integer enables the floor.
 An absent, unreadable, symlinked, empty, zero, or non-numeric value means the floor is off.
-When the floor is on, `bin/fm-refill-lib.sh` counts only `kind=ship` workers whose authoritative `bin/fm-crew-state.sh` current state is `working` and whose recorded backend endpoint is present.
+When the floor is on, `bin/fm-refill-lib.sh` counts only `kind=ship` workers whose authoritative `bin/fm-crew-state.sh` current state is `working`, whose recorded backend endpoint is present, and whose recovery-grade agent state is not confirmed dead or missing.
 Dead, unknown, terminal, parked, paused, scout, and secondmate records do not count as live capacity.
 When that live count drops below the target, the library enqueues one durable `check: refill floor:` wake so the supervising agent runs the normal claim-and-dispatch procedure.
 The floor is evaluated on locked session start, completion, watcher startup, and watcher heartbeat, while every running watcher cycle cheaply surfaces a newly queued or pending refill.

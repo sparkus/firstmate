@@ -16,7 +16,7 @@ Those actionable wakes are written to a durable local queue (`state/.wake-queue`
 Completion also enqueues a durable refill wake through `bin/fm-refill-lib.sh`.
 Merge-poll `merged` and successful ship/scout teardown each use one crash-recoverable per-task receipt and append `check: refill completion <id>:` exactly once after a successful commit.
 Queue drain finalizes any pending completion receipt before consuming its row, so a crash between receipt claim and append retries the missing wake while a committed wake remains deduped across restart.
-An optional `config/concurrency-floor` target independently appends `check: refill floor:` when authoritative current-state and endpoint-presence reads show fewer live working ships than the target.
+An optional `config/concurrency-floor` target independently appends `check: refill floor:` when authoritative current-state, endpoint-presence, and recovery-grade agent-state reads show fewer live working ships than the target.
 Session start, watcher startup, completion, and heartbeat evaluate refill state, every watcher cycle surfaces a newly queued or pending refill, and the shared supervision predicate keeps queued, pending, or below-target homes active with zero task metadata.
 Successful ship dispatch clears a handled completion need automatically, `bin/fm-refill-complete.sh` clears it after a handled no-ready, no-eligible, or held-only claim cycle, and meeting or disabling the floor clears its independent need.
 Until ship worktree leases protect pool slots, unreadable or unproven ship worktree state, including `local-only`, fails closed with a dispatch hold in every refill payload.

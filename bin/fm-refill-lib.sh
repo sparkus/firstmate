@@ -12,12 +12,23 @@
 _FM_REFILL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$_FM_REFILL_LIB_DIR/fm-wake-lib.sh"
-# shellcheck source=bin/fm-backend.sh
-. "$_FM_REFILL_LIB_DIR/fm-backend.sh"
 
 FM_REFILL_CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 FM_REFILL_REASON=
 FM_REFILL_HAZARD=
+
+fm_refill_backend_load() {
+  if declare -F fm_backend_of_meta >/dev/null \
+    && declare -F fm_backend_target_of_meta >/dev/null \
+    && declare -F fm_backend_target_exists >/dev/null \
+    && declare -F fm_backend_agent_state >/dev/null; then
+    return 0
+  fi
+  [ -f "$_FM_REFILL_LIB_DIR/fm-backend.sh" ] \
+    && [ ! -L "$_FM_REFILL_LIB_DIR/fm-backend.sh" ] || return 1
+  # shellcheck source=bin/fm-backend.sh
+  . "$_FM_REFILL_LIB_DIR/fm-backend.sh"
+}
 
 fm_refill_task_id_valid() {
   local id=$1
@@ -62,8 +73,12 @@ fm_refill_concurrency_floor() {
 }
 
 fm_refill_live_ship_count() {
-  local state=${1:-$STATE} meta id kind backend target verdict n=0
+  local state=${1:-$STATE} meta id kind backend target agent_state verdict n=0
   local reader=${FM_CREW_STATE_BIN:-$_FM_REFILL_LIB_DIR/fm-crew-state.sh}
+  if ! fm_refill_backend_load; then
+    printf '0\n'
+    return 0
+  fi
   shopt -s nullglob
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] && [ ! -L "$meta" ] || continue
@@ -76,6 +91,8 @@ fm_refill_live_ship_count() {
     target=$(fm_backend_target_of_meta "$meta")
     [ -n "$target" ] || continue
     fm_backend_target_exists "$backend" "$target" "fm-$id" || continue
+    agent_state=$(fm_backend_agent_state "$backend" "$target") || agent_state=unreadable
+    case "$agent_state" in dead|missing) continue ;; esac
     verdict=$(FM_HOME="$(dirname "$state")" FM_STATE_OVERRIDE="$state" \
       FM_CREW_STATE_NM_TIMEOUT="${FM_REFILL_CREW_STATE_NM_TIMEOUT:-2}" \
       "$reader" "$id" 2>/dev/null) || verdict=

@@ -37,7 +37,21 @@ if [ "${1:-}" = display-message ]; then
   done
   [ -n "$target" ] || exit 1
   [ "$target" != "${FM_REFILL_DEAD_TARGET:-}" ] || exit 1
+  case "$*" in
+    *pane_current_command*)
+      if [ "$target" = "${FM_REFILL_DEAD_AGENT_TARGET:-}" ]; then
+        printf 'zsh\n'
+      else
+        printf 'codex\n'
+      fi
+      exit 0
+      ;;
+  esac
   printf '%%1\n'
+  exit 0
+fi
+if [ "${1:-}" = list-windows ]; then
+  [ -n "${FM_REFILL_TMUX_WINDOWS:-}" ] && printf '%s\n' "$FM_REFILL_TMUX_WINDOWS"
   exit 0
 fi
 exit 1
@@ -52,6 +66,8 @@ source_refill() {
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
     FM_CREW_STATE_BIN="$home/fake-crew-state" \
     FM_REFILL_DEAD_TARGET="${FM_REFILL_DEAD_TARGET:-}" \
+    FM_REFILL_DEAD_AGENT_TARGET="${FM_REFILL_DEAD_AGENT_TARGET:-}" \
+    FM_REFILL_TMUX_WINDOWS="${FM_REFILL_TMUX_WINDOWS:-}" \
     FM_REFILL_TEST_STOP_AFTER_PENDING="${FM_REFILL_TEST_STOP_AFTER_PENDING:-0}" \
     PATH="$home/fakebin:$PATH" \
     bash -c '
@@ -272,6 +288,21 @@ test_working_ship_with_dead_endpoint_does_not_count_live() {
   pass "live ship count requires working lifecycle and a present endpoint"
 }
 
+test_working_ship_with_dead_agent_does_not_count_live() {
+  local home live windows
+  home=$(make_refill_home floor-dead-agent)
+  printf 'window=session:w-live\nkind=ship\n' > "$home/state/live.meta"
+  printf 'window=session:w-dead\nkind=ship\n' > "$home/state/dead.meta"
+  printf 'state: working · source: run-step · active run\n' > "$home/state/live.current"
+  printf 'state: working · source: run-step · lingering active run\n' > "$home/state/dead.current"
+  windows=$(printf 'w-live\nw-dead')
+  live=$(FM_REFILL_DEAD_AGENT_TARGET=session:w-dead \
+    FM_REFILL_TMUX_WINDOWS="$windows" \
+    source_refill "$home" fm_refill_live_ship_count)
+  [ "$live" = 1 ] || fail "dead agent with a surviving endpoint inflated live capacity: $live"
+  pass "live ship count rejects a confirmed dead agent with a lingering run"
+}
+
 test_parked_unpushed_probe() {
   local home wt
   home=$(make_refill_home parked-probe)
@@ -427,6 +458,7 @@ test_absent_config_floor_off
 test_scouts_and_secondmates_do_not_count_as_live_ships
 test_parked_ship_meta_does_not_count_live
 test_working_ship_with_dead_endpoint_does_not_count_live
+test_working_ship_with_dead_agent_does_not_count_live
 test_parked_unpushed_probe
 test_unreadable_git_state_fails_closed_for_both_payloads
 test_empty_home_floor_is_explicit_supervision_need
