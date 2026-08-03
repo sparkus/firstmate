@@ -3308,6 +3308,46 @@ test_send_text_submit_queued_unsubmitted_retry_succeeds() {
   pass "fm_backend_herdr_send_text_submit: bounded Enter retry submits a parked numbered queue item"
 }
 
+test_send_text_submit_unreadable_queue_probe_never_reports_delivered() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-queue-probe-unreadable"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/4.out"
+  printf '1\n' > "$resp/5.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = unknown ] \
+    || fail "an unreadable post-success queue probe must return unknown, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "an unreadable queue probe must not send another Enter, sent $enter_count"
+  pass "fm_backend_herdr_send_text_submit: unreadable queue verification never reports delivered"
+}
+
+test_send_text_submit_queue_clear_on_exhaustion_rescan_reports_empty() {
+  local dir log resp fb out queue_pane clear_pane
+  dir="$TMP_ROOT/submit-queue-clear-on-rescan"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  queue_pane='#1 [fm-from-firstmate]corr=abcd do the work
+╭────────╮
+│ >      │
+╰────────╯
+'
+  clear_pane='╭────────╮
+│ >      │
+╰────────╯
+'
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/2.out"
+  printf '%s' "$queue_pane" > "$resp/4.out"
+  printf '%s' "$queue_pane" > "$resp/5.out"
+  printf '%s' "$clear_pane" > "$resp/6.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "[fm-from-firstmate]corr=abcd do the work" 1 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] \
+    || fail "a queue cleared on the exhaustion rescan must return empty, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: exhaustion rescan preserves candidate-empty delivery proof"
+}
+
 test_send_text_submit_send_failed() {
   local dir log resp fb out
   dir="$TMP_ROOT/submit-fail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -4072,6 +4112,8 @@ test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmat
 test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter
 test_send_text_submit_queued_unsubmitted_fails_loud
 test_send_text_submit_queued_unsubmitted_retry_succeeds
+test_send_text_submit_unreadable_queue_probe_never_reports_delivered
+test_send_text_submit_queue_clear_on_exhaustion_rescan_reports_empty
 test_send_text_submit_send_failed
 test_send_text_submit_unknown_on_capture_failure
 test_dispatch_routes_herdr_backend

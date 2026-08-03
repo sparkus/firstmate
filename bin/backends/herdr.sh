@@ -2693,15 +2693,21 @@ EOF
 # busy, or non-idle composer empty), a pane scan for that positive queue marker
 # keeps retrying Enter only; exhaustion reports `queued-unsubmitted` so
 # fm-send exits non-zero instead of claiming delivery.
-fm_backend_herdr_has_queued_unsubmitted() {  # <target>
+fm_backend_herdr_queued_unsubmitted_state() {  # <target> -> queued|clear|unknown
   local cap
   # Generous enough to cover queue rows sitting just above the composer.
-  cap=$(fm_backend_herdr_capture "$1" "${FM_BACKEND_HERDR_COMPOSER_LINES:-20}" 2>/dev/null) || return 1
-  printf '%s\n' "$cap" | fm_composer_has_queued_unsubmitted
+  cap=$(fm_backend_herdr_capture "$1" "${FM_BACKEND_HERDR_COMPOSER_LINES:-20}" 2>/dev/null) \
+    || { printf 'unknown'; return 0; }
+  if printf '%s\n' "$cap" | fm_composer_has_queued_unsubmitted; then
+    printf 'queued'
+  else
+    printf 'clear'
+  fi
 }
 
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
+  local queue_state candidate_empty=0
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
@@ -2727,22 +2733,30 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
         *) verdict=pending ;;
       esac
     fi
+    candidate_empty=0
     if [ "$verdict" = empty ]; then
-      # Positive queue proof overrides empty: the steer is still undelivered.
-      if fm_backend_herdr_has_queued_unsubmitted "$target"; then
-        verdict=pending
-      else
-        printf 'empty'
-        return 0
-      fi
+      candidate_empty=1
+      queue_state=$(fm_backend_herdr_queued_unsubmitted_state "$target")
+      case "$queue_state" in
+        queued) verdict=pending ;;
+        clear) printf 'empty'; return 0 ;;
+        *) printf 'unknown'; return 0 ;;
+      esac
     fi
     i=$((i + 1))
     [ "$i" -lt "$retries" ] || {
-      if fm_backend_herdr_has_queued_unsubmitted "$target"; then
-        printf 'queued-unsubmitted'
-      else
-        printf 'pending'
-      fi
+      queue_state=$(fm_backend_herdr_queued_unsubmitted_state "$target")
+      case "$queue_state" in
+        queued) printf 'queued-unsubmitted' ;;
+        clear)
+          if [ "$candidate_empty" = 1 ]; then
+            printf 'empty'
+          else
+            printf 'pending'
+          fi
+          ;;
+        *) printf 'unknown' ;;
+      esac
       return 0
     }
   done
