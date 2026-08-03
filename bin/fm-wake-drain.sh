@@ -6,6 +6,8 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-refill-lib.sh
+. "$SCRIPT_DIR/fm-refill-lib.sh"
 
 DRAIN_TMP=
 DRAIN_LOCK_HELD=false
@@ -50,6 +52,8 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   assert_watcher_liveness
   exit 0
 fi
+
+fm_refill_finalize_completion_receipts "$FM_WAKE_QUEUE" "$STATE" || exit 1
 
 DRAIN_TMP="$STATE/.wake-queue.drain.$(fm_current_pid)"
 rm -f "$DRAIN_TMP"

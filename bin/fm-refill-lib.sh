@@ -1,53 +1,21 @@
 #!/usr/bin/env bash
-# Shared completion-triggered refill and concurrency-floor signalling.
+# shellcheck disable=SC2034
+# Shared completion-triggered refill, concurrency-floor signalling, and refill
+# supervision ownership.
 #
-# OWNERSHIP: this library is the single owner of:
-#   - durable completion-refill wakes (kind=check, key=refill:<task-id>)
-#   - concurrency-floor top-up wakes (kind=check, key=refill-floor)
-#   - per-task completion idempotence markers (state/.refill-completion-<id>)
-#   - config/concurrency-floor parsing
-#   - the pre-lease parked-unpushed hazard probe used before top-up dispatch
-#
-# PROBLEM: continuous refill was a rule the supervising agent had to remember
-# mid-turn. Long single turns that landed work never reached claim-next, so the
-# queue starved. Completion events already existed (merge-poll wake, teardown
-# backlog reminder) but neither emitted a durable signal the agent must act on.
-#
-# CONTRACT:
-#   - Emits durable wake-queue records only. Never spawns, claims, or edits the
-#     backlog. The supervising agent still runs the normal claim-and-dispatch
-#     procedure (verify-at-pickup, atomic claim, exclusions, held/parked).
-#   - Completion emit is idempotent per task id: a second delivery of the same
-#     completion event (merge re-fire, teardown retry, afk re-escalation) does
-#     not enqueue a second refill wake.
-#   - Floor emit is independent of completion: when live ship count is below
-#     config/concurrency-floor, one top-up wake is enqueued (wake-queue key
-#     dedupe collapses duplicates still pending). Absent/0/invalid config = off.
-#   - Until ship worktree leases land (fix-lease-ship-worktrees), dispatch must
-#     hold while any live ship worktree has unpushed commits; this library only
-#     probes that hazard and never reimplements pool leasing.
-#
-# Usage (source from bin/ scripts):
-#   . "$SCRIPT_DIR/fm-refill-lib.sh"
-#   fm_refill_emit_completion <task-id>   # 0 if newly emitted, 1 if deduped/skip
-#   fm_refill_emit_floor_if_needed        # 0 if newly emitted, 1 if no top-up
-#   fm_refill_concurrency_floor           # prints non-negative integer target
-#   fm_refill_live_ship_count             # prints current live ship meta count
-#   fm_refill_has_parked_unpushed         # 0 when hazard present, 1 when clear
-#
-# FM_REFILL_REASON is set to the wake payload when an emit returns 0.
+# Completion and floor events only signal the normal claim-and-dispatch path.
+# They never spawn, claim, or bypass pickup checks, exclusions, holds, or parks.
+# A home remains supervision-active while a refill wake is queued, a completion
+# or floor refill remains unhandled, a completion receipt is pending, or an
+# enabled concurrency floor is below target.
 
 _FM_REFILL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$_FM_REFILL_LIB_DIR/fm-wake-lib.sh"
 
-# Prefer the caller's FM_CONFIG_OVERRIDE; otherwise the home's config dir.
-# wake-lib already resolved FM_HOME/STATE for this process.
 FM_REFILL_CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
-
-# Set to the wake payload when an emit returns 0; callers (fm-watch.sh) read it.
-# shellcheck disable=SC2034 # External consumer reads this after a successful emit.
 FM_REFILL_REASON=
+FM_REFILL_HAZARD=
 
 fm_refill_task_id_valid() {
   local id=$1
@@ -57,57 +25,72 @@ fm_refill_task_id_valid() {
   [ "${#id}" -le 64 ]
 }
 
-# Print the configured concurrency floor (live ships target). Absent file,
-# unreadable path, symlink, empty, zero, or non-digits → 0 (feature off).
+fm_refill_normalize_count() {
+  local value=$1
+  value=${value#"${value%%[!0]*}"}
+  [ -n "$value" ] || value=0
+  printf '%s\n' "$value"
+}
+
+fm_refill_count_below_target() {
+  local live floor
+  live=$(fm_refill_normalize_count "$1")
+  floor=$(fm_refill_normalize_count "$2")
+  [ "${#live}" -lt "${#floor}" ] && return 0
+  [ "${#live}" -gt "${#floor}" ] && return 1
+  [[ "$live" < "$floor" ]]
+}
+
 fm_refill_concurrency_floor() {
-  local f line
-  f="$FM_REFILL_CONFIG/concurrency-floor"
+  local config=${1:-$FM_REFILL_CONFIG} f line lines
+  f="$config/concurrency-floor"
   if [ ! -f "$f" ] || [ -L "$f" ]; then
     printf '0\n'
     return 0
   fi
-  line=$(head -n 1 "$f" 2>/dev/null | tr -d '[:space:]') || line=
+  lines=$(awk 'END { print NR + 0 }' "$f" 2>/dev/null) || lines=0
+  [ "$lines" = 1 ] || { printf '0\n'; return 0; }
+  line=$(head -n 1 "$f" 2>/dev/null) || line=
+  line=${line#"${line%%[![:space:]]*}"}
+  line=${line%"${line##*[![:space:]]}"}
   case "$line" in
-    ''|0|*[!0-9]*)
-      printf '0\n'
-      ;;
-    *)
-      printf '%s\n' "$line"
-      ;;
+    ''|0|*[!0-9]*) printf '0\n' ;;
+    *) fm_refill_normalize_count "$line" ;;
   esac
 }
 
-# Count live ship workers from state/<id>.meta. Missing kind defaults to ship
-# (spawn's historical default). Scouts and secondmates do not count.
 fm_refill_live_ship_count() {
-  local meta id kind n=0
+  local state=${1:-$STATE} meta id kind verdict n=0
+  local reader=${FM_CREW_STATE_BIN:-$_FM_REFILL_LIB_DIR/fm-crew-state.sh}
   shopt -s nullglob
-  for meta in "$STATE"/*.meta; do
+  for meta in "$state"/*.meta; do
     [ -f "$meta" ] && [ ! -L "$meta" ] || continue
     id=$(basename "$meta" .meta)
     fm_refill_task_id_valid "$id" || continue
     kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     [ -n "$kind" ] || kind=ship
-    case "$kind" in
-      ship) n=$((n + 1)) ;;
+    [ "$kind" = ship ] || continue
+    verdict=$(FM_HOME="$(dirname "$state")" FM_STATE_OVERRIDE="$state" \
+      FM_CREW_STATE_NM_TIMEOUT="${FM_REFILL_CREW_STATE_NM_TIMEOUT:-2}" \
+      "$reader" "$id" 2>/dev/null) || verdict=
+    case "$verdict" in
+      'state: working · '*) n=$((n + 1)) ;;
     esac
   done
   shopt -u nullglob
   printf '%s\n' "$n"
 }
 
-# 0 when any live ship worktree still has commits not on any remote (the
-# pre-lease pool-recycle hazard). local-only ships are excluded: they land via
-# local main rather than a remote push. Returns 1 when clear or unreadable.
-# Coordinate with fix-lease-ship-worktrees: once ship worktrees are leased, the
-# supervising agent can stop treating this probe as a hard hold.
 fm_refill_has_parked_unpushed() {
-  local meta id kind mode wt unpushed
+  local state=${1:-$STATE} meta kind mode wt unpushed
+  FM_REFILL_HAZARD=
   shopt -s nullglob
-  for meta in "$STATE"/*.meta; do
-    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
-    id=$(basename "$meta" .meta)
-    fm_refill_task_id_valid "$id" || continue
+  for meta in "$state"/*.meta; do
+    if [ ! -f "$meta" ] || [ -L "$meta" ]; then
+      FM_REFILL_HAZARD="unreadable metadata state for $(basename "$meta" .meta)"
+      shopt -u nullglob
+      return 0
+    fi
     kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     [ -n "$kind" ] || kind=ship
     [ "$kind" = ship ] || continue
@@ -115,9 +98,18 @@ fm_refill_has_parked_unpushed() {
     [ -n "$mode" ] || mode=no-mistakes
     [ "$mode" != local-only ] || continue
     wt=$(grep '^worktree=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-    [ -n "$wt" ] && [ -d "$wt" ] || continue
-    unpushed=$(git -C "$wt" log --oneline HEAD --not --remotes -- 2>/dev/null) || continue
+    if [ -z "$wt" ] || [ ! -d "$wt" ]; then
+      FM_REFILL_HAZARD="unknown worktree state for $(basename "$meta" .meta)"
+      shopt -u nullglob
+      return 0
+    fi
+    if ! unpushed=$(git -C "$wt" log --oneline HEAD --not --remotes -- 2>/dev/null); then
+      FM_REFILL_HAZARD="unreadable git state for $(basename "$meta" .meta)"
+      shopt -u nullglob
+      return 0
+    fi
     if [ -n "$unpushed" ]; then
+      FM_REFILL_HAZARD="unpushed commits in $(basename "$meta" .meta)"
       shopt -u nullglob
       return 0
     fi
@@ -126,81 +118,236 @@ fm_refill_has_parked_unpushed() {
   return 1
 }
 
-fm_refill_completion_marker() {
-  local id=$1
-  printf '%s/.refill-completion-%s\n' "$STATE" "$id"
+fm_refill_hold_suffix() {
+  local state=${1:-$STATE}
+  if fm_refill_has_parked_unpushed "$state"; then
+    printf '%s' "; HOLD: parked ship worktree safety is not proven ($FM_REFILL_HAZARD) - do not pool-dispatch until leases protect ship worktrees or the state is proven clear"
+  fi
 }
 
-# Claim exclusive right to emit one completion refill for <task-id>.
-# Uses noclobber create so concurrent and re-fired deliveries race safely.
-# Returns 0 on fresh claim, 1 if already claimed or id invalid.
-fm_refill_claim_completion() {
-  local id=$1 marker
+fm_refill_completion_marker() {
+  printf '%s/.refill-completion-%s\n' "${2:-$STATE}" "$1"
+}
+
+fm_refill_completion_needed_marker() {
+  printf '%s/.refill-needed-completion\n' "${1:-$STATE}"
+}
+
+fm_refill_floor_needed_marker() {
+  printf '%s/.refill-needed-floor\n' "${1:-$STATE}"
+}
+
+fm_refill_atomic_write() {
+  local path=$1 value=$2 dir tmp
+  dir=$(dirname "$path")
+  mkdir -p "$dir" || return 1
+  tmp=$(mktemp "$dir/.refill-write.XXXXXX") || return 1
+  if ! (umask 077; printf '%s\n' "$value" > "$tmp") || ! mv -f "$tmp" "$path"; then
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+}
+
+fm_refill_mark_needed() {
+  fm_refill_atomic_write "$1" "needed $(date +%s)"
+}
+
+fm_refill_marker_state() {
+  local marker=$1 value
+  [ -e "$marker" ] || { printf 'absent\n'; return 0; }
+  [ -f "$marker" ] && [ ! -L "$marker" ] || { printf 'pending\n'; return 0; }
+  value=$(head -n 1 "$marker" 2>/dev/null || true)
+  case "$value" in
+    pending*) printf 'pending\n' ;;
+    committed*) printf 'committed\n' ;;
+    ''|*[!0-9]*) printf 'pending\n' ;;
+    *) printf 'committed\n' ;;
+  esac
+}
+
+fm_refill_queue_payload_locked() {
+  local key=$1 queue=${2:-$FM_WAKE_QUEUE}
+  awk -F '\t' -v key="$key" '$3 == "check" && $4 == key { payload = $5 } END { if (payload != "") print payload; else exit 1 }' \
+    "$queue" 2>/dev/null
+}
+
+fm_refill_queue_any_payload_locked() {
+  local queue=${1:-$FM_WAKE_QUEUE}
+  awk -F '\t' '$3 == "check" && $4 ~ /^refill([:-]|$)/ { payload = $5 } END { if (payload != "") print payload; else exit 1 }' \
+    "$queue" 2>/dev/null
+}
+
+fm_refill_commit_completion_marker() {
+  local id=$1 state=${2:-$STATE}
+  fm_refill_atomic_write "$(fm_refill_completion_marker "$id" "$state")" "committed $(date +%s)"
+}
+
+fm_refill_finalize_completion_receipts() {
+  local queue=${1:-$FM_WAKE_QUEUE} state=${2:-$STATE} key id
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    id=${key#refill:}
+    fm_refill_task_id_valid "$id" || return 1
+    fm_refill_commit_completion_marker "$id" "$state" || return 1
+    fm_refill_mark_needed "$(fm_refill_completion_needed_marker "$state")" || return 1
+  done < <(awk -F '\t' '$3 == "check" && $4 ~ /^refill:/ && !seen[$4]++ { print $4 }' "$queue" 2>/dev/null)
+}
+
+fm_refill_recover_pending_completions() {
+  local state=${1:-$STATE} marker id
+  shopt -s nullglob
+  for marker in "$state"/.refill-completion-*; do
+    [ "$(fm_refill_marker_state "$marker")" = pending ] || continue
+    id=${marker##*/.refill-completion-}
+    fm_refill_task_id_valid "$id" || continue
+    fm_refill_emit_completion "$id" >/dev/null 2>&1 || true
+  done
+  shopt -u nullglob
+}
+
+fm_refill_emit_floor_if_needed() {
+  local state=${1:-$STATE} config=${2:-$FM_REFILL_CONFIG} floor live payload existing status=1
+  FM_REFILL_REASON=
+  floor=$(fm_refill_concurrency_floor "$config")
+  case "$floor" in
+    ''|0|*[!0-9]*)
+      fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+      rm -f "$(fm_refill_floor_needed_marker "$state")" 2>/dev/null || true
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      return 1
+      ;;
+  esac
+  live=$(fm_refill_live_ship_count "$state")
+  case "$live" in ''|*[!0-9]*) live=0 ;; esac
+  if ! fm_refill_count_below_target "$live" "$floor"; then
+    fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+    rm -f "$(fm_refill_floor_needed_marker "$state")" 2>/dev/null || true
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 1
+  fi
+  payload="check: refill floor: live ships $live below target $floor; run normal claim-and-dispatch (tasks-axi ready, date gates, exclusions, held and parked); do not blind-spawn$(fm_refill_hold_suffix "$state")"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  fm_refill_mark_needed "$(fm_refill_floor_needed_marker "$state")" || {
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 1
+  }
+  existing=$(fm_refill_queue_payload_locked refill-floor 2>/dev/null || true)
+  if [ -n "$existing" ]; then
+    FM_REFILL_REASON=$existing
+  elif fm_wake_append_locked check refill-floor "$payload"; then
+    FM_REFILL_REASON=$payload
+    status=0
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return "$status"
+}
+
+fm_refill_emit_completion() {
+  local id=$1 marker key payload existing marker_state status=1
+  FM_REFILL_REASON=
   fm_refill_task_id_valid "$id" || return 1
   marker=$(fm_refill_completion_marker "$id")
-  mkdir -p "$STATE" || return 1
-  if (
-    set -C
-    umask 077
-    : >"$marker"
-  ) 2>/dev/null; then
-    printf '%s\n' "$(date +%s)" >"$marker" || true
-    return 0
+  key="refill:$id"
+  payload="check: refill completion $id: run normal claim-and-dispatch (tasks-axi ready, date gates, exclusions, held and parked); do not blind-spawn$(fm_refill_hold_suffix "$STATE")"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  marker_state=$(fm_refill_marker_state "$marker")
+  if [ "$marker_state" = committed ]; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    fm_refill_emit_floor_if_needed >/dev/null 2>&1 || true
+    return 1
   fi
+  if [ "$marker_state" = absent ]; then
+    fm_refill_atomic_write "$marker" "pending $(date +%s)" || {
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      return 1
+    }
+  fi
+  fm_refill_mark_needed "$(fm_refill_completion_needed_marker)" || {
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 1
+  }
+  if [ "${FM_REFILL_TEST_STOP_AFTER_PENDING:-0}" = 1 ]; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 75
+  fi
+  existing=$(fm_refill_queue_payload_locked "$key" 2>/dev/null || true)
+  if [ -n "$existing" ]; then
+    fm_refill_commit_completion_marker "$id" || {
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      return 1
+    }
+    FM_REFILL_REASON=$existing
+  elif fm_wake_append_locked check "$key" "$payload"; then
+    fm_refill_commit_completion_marker "$id" || {
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      return 1
+    }
+    FM_REFILL_REASON=$payload
+    status=0
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  fm_refill_emit_floor_if_needed >/dev/null 2>&1 || true
+  [ "$status" -ne 0 ] || FM_REFILL_REASON=$payload
+  return "$status"
+}
+
+fm_refill_pending_marker_exists() {
+  local state=${1:-$STATE} marker id
+  [ -f "$(fm_refill_completion_needed_marker "$state")" ] && return 0
+  [ -f "$(fm_refill_floor_needed_marker "$state")" ] && return 0
+  shopt -s nullglob
+  for marker in "$state"/.refill-completion-*; do
+    [ "$(fm_refill_marker_state "$marker")" = pending ] || continue
+    id=${marker##*/.refill-completion-}
+    fm_refill_task_id_valid "$id" || continue
+    shopt -u nullglob
+    return 0
+  done
+  shopt -u nullglob
   return 1
 }
 
-fm_refill_release_completion_claim() {
-  local id=$1 marker
-  fm_refill_task_id_valid "$id" || return 0
-  marker=$(fm_refill_completion_marker "$id")
-  rm -f -- "$marker" 2>/dev/null || true
+fm_refill_supervision_needed() {
+  local state=${1:-$STATE} config=${2:-$FM_REFILL_CONFIG} floor live
+  fm_refill_queue_any_payload_locked "$state/.wake-queue" >/dev/null 2>&1 && return 0
+  fm_refill_pending_marker_exists "$state" && return 0
+  floor=$(fm_refill_concurrency_floor "$config")
+  case "$floor" in ''|0|*[!0-9]*) return 1 ;; esac
+  live=$(fm_refill_live_ship_count "$state")
+  case "$live" in ''|*[!0-9]*) live=0 ;; esac
+  fm_refill_count_below_target "$live" "$floor"
 }
 
-# Emit one durable completion-refill wake for <task-id>.
-# Idempotent: a second call for the same id is a no-op (return 1).
-# Does not spawn. On success sets FM_REFILL_REASON and returns 0.
-fm_refill_emit_completion() {
-  local id=$1 key payload
-  # shellcheck disable=SC2034 # Cleared for callers that read FM_REFILL_REASON after emit.
+fm_refill_emit_pending_if_needed() {
+  local payload existing
   FM_REFILL_REASON=
-  fm_refill_task_id_valid "$id" || return 1
-  fm_refill_claim_completion "$id" || return 1
-  key="refill:$id"
-  payload="check: refill completion $id: run normal claim-and-dispatch (tasks-axi ready, date gates, exclusions, held and parked); do not blind-spawn"
-  if ! fm_wake_append check "$key" "$payload"; then
-    fm_refill_release_completion_claim "$id"
+  fm_refill_emit_floor_if_needed >/dev/null 2>&1 || true
+  fm_refill_recover_pending_completions "$STATE"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  existing=$(fm_refill_queue_any_payload_locked 2>/dev/null || true)
+  if [ -n "$existing" ]; then
+    FM_REFILL_REASON=$existing
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 0
+  fi
+  if ! fm_refill_pending_marker_exists "$STATE"; then
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
     return 1
   fi
-  # shellcheck disable=SC2034 # Public result consumed by fm-watch.sh after a successful emit.
-  FM_REFILL_REASON=$payload
-  return 0
+  payload="check: refill pending: run normal claim-and-dispatch (tasks-axi ready, date gates, exclusions, held and parked); do not blind-spawn$(fm_refill_hold_suffix "$STATE")"
+  if fm_wake_append_locked check refill-pending "$payload"; then
+    FM_REFILL_REASON=$payload
+    fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+    return 0
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  return 1
 }
 
-# Emit one durable floor top-up wake when live ships are below the configured
-# target. Absent/zero floor → no-op. At or above target → no-op. Pending queue
-# key refill-floor collapses duplicates until drained; a later drop below the
-# floor after drain can emit again (independent safety net).
-# Returns 0 when newly enqueued, 1 when no top-up is needed or enqueue fails.
-fm_refill_emit_floor_if_needed() {
-  local floor live payload
-  # shellcheck disable=SC2034 # Cleared for callers that read FM_REFILL_REASON after emit.
-  FM_REFILL_REASON=
-  floor=$(fm_refill_concurrency_floor)
-  case "$floor" in
-    ''|0|*[!0-9]*) return 1 ;;
-  esac
-  live=$(fm_refill_live_ship_count)
-  case "$live" in
-    ''|*[!0-9]*) live=0 ;;
-  esac
-  [ "$live" -lt "$floor" ] || return 1
-  payload="check: refill floor: live ships $live below target $floor; run normal claim-and-dispatch (tasks-axi ready, date gates, exclusions, held and parked); do not blind-spawn"
-  if fm_refill_has_parked_unpushed; then
-    payload="$payload; HOLD: parked ship worktree has unpushed commits - do not pool-dispatch until leases protect ship worktrees or unpushed work is cleared"
-  fi
-  fm_wake_append check refill-floor "$payload" || return 1
-  # shellcheck disable=SC2034 # Public result consumed by fm-watch.sh after a successful emit.
-  FM_REFILL_REASON=$payload
-  return 0
+fm_refill_dispatch_cycle_completed() {
+  local state=${1:-$STATE} config=${2:-$FM_REFILL_CONFIG}
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  rm -f "$(fm_refill_completion_needed_marker "$state")" 2>/dev/null || true
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  fm_refill_emit_floor_if_needed "$state" "$config" >/dev/null 2>&1 || true
 }

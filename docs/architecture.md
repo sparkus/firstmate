@@ -14,8 +14,12 @@ Repeated provably-working stale escalations on the same unchanged pane add an es
 A busy pane is otherwise exempt from staleness, but only until its latest `state/<id>.turn-ended` marker reaches `FM_BUSY_TURN_MAX_SECS`, or its `state/<id>.meta` spawn record reaches that age before any turn completes; past that bound it is routed through the same wedge escalation, with the identical reason, escalation count, and `demand-deep-inspection` marker, for inspection only - never an automatic interrupt, signal, or restart.
 Those actionable wakes are written to a durable local queue (`state/.wake-queue`) before detector state advances, so a missed process exit can be recovered by draining the queue.
 Completion also enqueues a durable refill wake through `bin/fm-refill-lib.sh`.
-Merge-poll `merged` and successful ship/scout teardown each claim one per-task completion marker and append `check: refill completion <id>:`.
-An optional `config/concurrency-floor` target independently appends `check: refill floor:` when live ships fall below that count on the heartbeat cadence.
+Merge-poll `merged` and successful ship/scout teardown each use one crash-recoverable per-task receipt and append `check: refill completion <id>:` exactly once after a successful commit.
+Queue drain finalizes any pending completion receipt before consuming its row, so a crash between receipt claim and append retries the missing wake while a committed wake remains deduped across restart.
+An optional `config/concurrency-floor` target independently appends `check: refill floor:` when authoritative current-state reads show fewer working ships than the target.
+Session start, watcher startup, completion, and heartbeat evaluate or surface refill state, while the shared supervision predicate keeps queued, pending, or below-target homes active with zero task metadata.
+Successful ship dispatch clears a handled completion need, and meeting or disabling the floor clears its independent need.
+Until ship worktree leases protect pool slots, unreadable or unproven non-local ship worktree state fails closed with a dispatch hold in every refill payload.
 Both signals only ask the supervising agent to run the ordinary claim-and-dispatch path; they never spawn, claim, or bypass exclusions.
 When a canonical validated PR poll returns exactly `merged`, the watcher appends that durable notification before publishing a private receipt bound to the poll's registration, bytes, file identities, metadata, provider, URL, and task ID.
 The receipt makes retirement safely retryable across restarts: fixed-path recovery revalidates the same evidence, removes the runnable check first, removes its registration and data sidecars, removes the receipt last, and preserves task metadata including `pr=` and `pr_head=`.

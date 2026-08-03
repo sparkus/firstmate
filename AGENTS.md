@@ -111,7 +111,8 @@ state/               volatile runtime signals; gitignored
   public-followup/   generated private transport for promised public replies: commitment registrations, typed terminal-result inbox, accepted/rejected ledgers (section 14; bin/fm-public-followup.sh)
   x-poll.error x-poll.claim-error  generated X-mode relay and offer-claim diagnostic dedupe markers
   .wake-queue        durable queued wakes: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
-  .refill-completion-<id>  idempotence marker for one completion-refill wake per task (bin/fm-refill-lib.sh)
+  .refill-completion-<id>  crash-recoverable idempotence receipt for one completion-refill wake per task (bin/fm-refill-lib.sh)
+  .refill-needed-completion .refill-needed-floor  durable home-level refill supervision markers (bin/fm-refill-lib.sh)
   .afk               durable away-mode flag; present = sub-supervisor may inject escalations (set by /afk, cleared on user return)
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .claude-autoarm.lock .claude-autoarm-epoch .turnend-claude-blocks   Claude Stop auto-arm single-flight, epoch, and guard-budget records; never touch
@@ -353,8 +354,8 @@ The promoted worker must inventory scratch state, return to a clean default-bran
 
 Fleet supervision is an always-loaded operational contract; `docs/architecture.md`, `docs/turnend-guard.md`, the emitted session-start block, and script help own mechanisms and harness-specific recipes.
 
-Whenever work is under way, keep exactly one live supervision cycle using the emitted protocol for this primary harness.
-X mode may require that same live cycle with no fleet work.
+Whenever work is under way or refill remains pending, keep exactly one live supervision cycle using the emitted protocol for this primary harness.
+X mode or an unmet concurrency floor may require that same live cycle with no fleet metadata.
 Do not substitute another harness's wait shape, use shell `&`, or create a second cycle when a healthy one already exists.
 For every actionable wake, follow the ordinary-wake continuation in the emitted protocol; use its repair action only when the live cycle is missing or failed.
 No turn ends blind while work is under way, including turns described as holding or waiting.
@@ -369,8 +370,8 @@ Handle actionable wakes as follows:
 1. For `signal:`, read the listed event lines first, then reconcile current state only where action depends on it.
 2. For `stale:`, inspect the recorded endpoint and load `stuck-crewmate-recovery` for a stopped, looping, confused, or unresponsive worker; a deep-inspection reason also requires current-state and validation-log inspection.
 3. For `check:`, act on the named poll result, including merges, X-mode events, and refill signals.
-   A `check: refill completion <id>:` or `check: refill floor:` wake is claim-next capacity, not a blind spawn: run the normal claim-and-dispatch procedure (verify-at-pickup, atomic claim, exclusions, held and parked items, date gates).
-   Until ship worktree leases land, hold pool dispatch when `fm_refill_has_parked_unpushed` reports parked unpushed commits (`bin/fm-refill-lib.sh`).
+   A `check: refill completion <id>:`, `check: refill floor:`, or `check: refill pending:` wake is claim-next capacity, not a blind spawn: run the normal claim-and-dispatch procedure (verify-at-pickup, atomic claim, exclusions, held and parked items, date gates).
+   Until ship worktree leases land, hold pool dispatch unless `fm_refill_has_parked_unpushed` proves every non-`local-only` ship worktree readable and free of unpushed commits (`bin/fm-refill-lib.sh`).
 4. For `heartbeat:`, review the whole fleet from the structured fleet view, reconcile suspicious tasks and PR state, update the backlog, and never report an unchanged fleet as progress.
 
 When any wake reports a merged PR for a project cloned in this home, refresh that clone through the guarded fleet-sync path.

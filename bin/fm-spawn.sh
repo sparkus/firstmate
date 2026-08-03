@@ -167,6 +167,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-refill-lib.sh
+. "$SCRIPT_DIR/fm-refill-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -1722,4 +1724,5 @@ if [ "$KIND" = secondmate ]; then
   fi
 fi
 
+[ "$KIND" != ship ] || fm_refill_dispatch_cycle_completed "$STATE" "$CONFIG"
 echo "spawned $ID harness=$HARNESS kind=$KIND mode=$MODE yolo=$YOLO window=$META_WINDOW worktree=$WT"

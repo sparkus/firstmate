@@ -16,6 +16,11 @@ make_refill_home() {
   local name=$1 dir
   dir=$(make_case "$name")
   mkdir -p "$dir/config" "$dir/state" "$dir/data"
+  cat > "$dir/fake-crew-state" <<'SH'
+#!/usr/bin/env bash
+cat "$FM_STATE_OVERRIDE/$1.current" 2>/dev/null || printf 'state: unknown · source: none · fixture\n'
+SH
+  chmod +x "$dir/fake-crew-state"
   printf '%s\n' "$dir"
 }
 
@@ -23,6 +28,8 @@ source_refill() {
   local home=$1
   # shellcheck disable=SC1090,SC1091
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_CREW_STATE_BIN="$home/fake-crew-state" \
+    FM_REFILL_TEST_STOP_AFTER_PENDING="${FM_REFILL_TEST_STOP_AFTER_PENDING:-0}" \
     bash -c '
       set -e
       . "$1"
@@ -83,7 +90,36 @@ test_completion_signal_is_durable_across_restart() {
   printf '%s\n' "$drain_out" | grep -F $'\tcheck\trefill:task-b\t' >/dev/null \
     || fail "drained rows missing durable refill:task-b wake: $drain_out"
   [ ! -s "$state/.wake-queue" ] || fail "queue should be empty after drain"
+  source_refill "$home" fm_refill_supervision_needed \
+    || fail "drained completion must remain a supervision need until dispatch"
+  source_refill "$home" fm_refill_dispatch_cycle_completed
+  source_refill "$home" fm_refill_supervision_needed \
+    && fail "successful dispatch cycle must clear completion supervision need" || true
   pass "completion refill signal is durable and survives restart re-fire"
+}
+
+test_crash_after_pending_claim_recovers_on_retry() {
+  local home state n
+  home=$(make_refill_home completion-crash)
+  state="$home/state"
+
+  FM_REFILL_TEST_STOP_AFTER_PENDING=1 source_refill "$home" fm_refill_emit_completion task-crash
+  [ "$?" -eq 75 ] || fail "crash seam must stop after durable pending claim"
+  [ ! -s "$state/.wake-queue" ] || fail "crash seam must stop before queue append"
+  grep -F 'pending ' "$state/.refill-completion-task-crash" >/dev/null \
+    || fail "crash seam did not retain a pending receipt"
+  source_refill "$home" fm_refill_supervision_needed \
+    || fail "pending completion receipt must keep supervision active"
+
+  source_refill "$home" fm_refill_emit_pending_if_needed \
+    || fail "supervision surface must recover the missing completion wake"
+  n=$(count_refill_keys "$state" "refill:task-crash")
+  [ "$n" -eq 1 ] || fail "recovered completion must enqueue exactly one wake, got $n"
+  grep -F 'committed ' "$state/.refill-completion-task-crash" >/dev/null \
+    || fail "recovered completion receipt was not committed"
+  source_refill "$home" fm_refill_emit_completion task-crash \
+    && fail "committed completion must remain deduped" || true
+  pass "pending completion crash recovers exactly one durable wake"
 }
 
 test_distinct_tasks_each_get_one_signal() {
@@ -99,12 +135,26 @@ test_distinct_tasks_each_get_one_signal() {
   pass "distinct completed tasks each produce one refill signal"
 }
 
+test_completion_also_evaluates_floor() {
+  local home state
+  home=$(make_refill_home completion-floor)
+  state="$home/state"
+  printf '2\n' > "$home/config/concurrency-floor"
+
+  source_refill "$home" fm_refill_emit_completion task-floor \
+    || fail "completion emit should succeed"
+  [ "$(count_refill_keys "$state" refill-floor)" -eq 1 ] \
+    || fail "completion did not independently evaluate the configured floor"
+  pass "completion emission also evaluates the concurrency floor"
+}
+
 test_floor_below_target_emits_top_up() {
   local home state n live
   home=$(make_refill_home floor-below)
   state="$home/state"
   printf '2\n' > "$home/config/concurrency-floor"
   printf 'window=w1\nkind=ship\n' > "$state/ship-a.meta"
+  printf 'state: working · source: pane · fixture\n' > "$state/ship-a.current"
 
   source_refill "$home" fm_refill_emit_floor_if_needed \
     || fail "floor below target should emit"
@@ -124,10 +174,13 @@ test_floor_at_or_above_target_silent() {
   printf '2\n' > "$home/config/concurrency-floor"
   printf 'window=w1\nkind=ship\n' > "$state/ship-a.meta"
   printf 'window=w2\nkind=ship\n' > "$state/ship-b.meta"
+  printf 'state: working · source: pane · fixture\n' > "$state/ship-a.current"
+  printf 'state: working · source: pane · fixture\n' > "$state/ship-b.current"
 
   source_refill "$home" fm_refill_emit_floor_if_needed \
     && fail "floor at target must not emit" || true
   printf 'window=w3\nkind=ship\n' > "$state/ship-c.meta"
+  printf 'state: working · source: pane · fixture\n' > "$state/ship-c.current"
   source_refill "$home" fm_refill_emit_floor_if_needed \
     && fail "floor above target must not emit" || true
   n=$(count_refill_keys "$state" refill-floor)
@@ -162,9 +215,22 @@ test_scouts_and_secondmates_do_not_count_as_live_ships() {
   printf 'window=w1\nkind=scout\n' > "$home/state/scout-a.meta"
   printf 'window=w2\nkind=secondmate\n' > "$home/state/sm-a.meta"
   printf 'window=w3\n' > "$home/state/default-ship.meta" # missing kind = ship
+  printf 'state: working · source: pane · fixture\n' > "$home/state/default-ship.current"
   live=$(source_refill "$home" fm_refill_live_ship_count)
   [ "$live" = 1 ] || fail "only default-kind ship should count, got $live"
   pass "live ship count excludes scout and secondmate meta"
+}
+
+test_parked_ship_meta_does_not_count_live() {
+  local home live
+  home=$(make_refill_home floor-parked)
+  printf 'window=w1\nkind=ship\n' > "$home/state/active.meta"
+  printf 'window=w2\nkind=ship\n' > "$home/state/parked.meta"
+  printf 'state: working · source: pane · fixture\n' > "$home/state/active.current"
+  printf 'state: parked · source: run-step · parked at review\n' > "$home/state/parked.current"
+  live=$(source_refill "$home" fm_refill_live_ship_count)
+  [ "$live" = 1 ] || fail "parked metadata inflated live capacity: $live"
+  pass "parked ship metadata does not count as live capacity"
 }
 
 test_parked_unpushed_probe() {
@@ -186,10 +252,60 @@ test_parked_unpushed_probe() {
   printf '3\n' > "$home/config/concurrency-floor"
   source_refill "$home" fm_refill_emit_floor_if_needed \
     || fail "floor should still emit with HOLD note"
-  grep -F 'HOLD: parked ship worktree has unpushed commits' \
+  grep -F 'HOLD: parked ship worktree safety is not proven' \
     "$home/state/.wake-queue" >/dev/null \
     || fail "floor payload must include parked-unpushed hold"
   pass "parked unpushed probe holds floor payload without blocking the signal"
+}
+
+test_unreadable_git_state_fails_closed_for_both_payloads() {
+  local home wt fakebin
+  home=$(make_refill_home parked-unknown)
+  wt="$home/wt-ship"
+  fakebin="$home/fakebin"
+  mkdir -p "$wt" "$fakebin"
+  printf 'window=w1\nkind=ship\nmode=no-mistakes\nworktree=%s\n' "$wt" \
+    > "$home/state/unknown.meta"
+  printf 'state: parked · source: run-step · parked at review\n' > "$home/state/unknown.current"
+  cat > "$fakebin/git" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/git"
+
+  PATH="$fakebin:$PATH" source_refill "$home" fm_refill_has_parked_unpushed \
+    || fail "failed git read must report a hold hazard"
+  printf '2\n' > "$home/config/concurrency-floor"
+  PATH="$fakebin:$PATH" source_refill "$home" fm_refill_emit_floor_if_needed \
+    || fail "floor should emit with unreadable git HOLD"
+  PATH="$fakebin:$PATH" source_refill "$home" fm_refill_emit_completion unknown \
+    || fail "completion should emit with unreadable git HOLD"
+  [ "$(grep -c 'HOLD: parked ship worktree safety is not proven' "$home/state/.wake-queue")" -eq 2 ] \
+    || fail "both floor and completion payloads must carry fail-closed HOLD"
+  pass "unreadable git state fails closed in every refill payload"
+}
+
+test_empty_home_floor_is_explicit_supervision_need() {
+  local home state out
+  home=$(make_refill_home empty-home)
+  state="$home/state"
+  printf '2\n' > "$home/config/concurrency-floor"
+
+  source_refill "$home" fm_refill_supervision_needed \
+    || fail "zero-meta home below configured floor must need supervision"
+  source_refill "$home" fm_refill_emit_pending_if_needed \
+    || fail "zero-meta home below floor must surface a refill wake"
+  [ "$(count_refill_keys "$state" refill-floor)" -eq 1 ] \
+    || fail "zero-meta floor did not enqueue its refill wake"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_CREW_STATE_BIN="$home/fake-crew-state" bash -c '
+      . "$1"
+      fm_supervision_needed "$2" 300
+      printf "%s %s\n" "$FM_SUP_NEEDED" "$FM_SUP_REFILL_NEEDED"
+    ' _ "$ROOT/bin/fm-supervision-lib.sh" "$state") \
+    || fail "shared supervision predicate rejected zero-meta refill need"
+  [ "$out" = "true true" ] || fail "shared supervision flags did not own refill need: $out"
+  pass "empty home below floor remains supervision-active and surfaces refill"
 }
 
 test_invalid_task_id_refused() {
@@ -206,10 +322,15 @@ test_invalid_task_id_refused() {
 
 test_completion_double_fire_emits_once
 test_completion_signal_is_durable_across_restart
+test_crash_after_pending_claim_recovers_on_retry
 test_distinct_tasks_each_get_one_signal
+test_completion_also_evaluates_floor
 test_floor_below_target_emits_top_up
 test_floor_at_or_above_target_silent
 test_absent_config_floor_off
 test_scouts_and_secondmates_do_not_count_as_live_ships
+test_parked_ship_meta_does_not_count_live
 test_parked_unpushed_probe
+test_unreadable_git_state_fails_closed_for_both_payloads
+test_empty_home_floor_is_explicit_supervision_need
 test_invalid_task_id_refused

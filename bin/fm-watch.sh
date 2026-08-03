@@ -50,6 +50,8 @@
 #                          durable completion-triggered claim-next (fm-refill-lib)
 #   check: refill floor: ...
 #                          concurrency-floor top-up when live ships are below target
+#   check: refill pending: ...
+#                          durable refill need re-surfaced after its earlier wake drained
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 # For normal supervision, resume the session-start primary-harness protocol
@@ -710,6 +712,10 @@ if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; the
   fm_wake_append check pr-poll-retirement "$reason" || exit 1
   touch "$STATE/.last-check"
   wake "$reason"
+fi
+
+if fm_refill_emit_pending_if_needed; then
+  wake "$FM_REFILL_REASON"
 fi
 
 while :; do
