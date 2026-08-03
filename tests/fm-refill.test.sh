@@ -317,9 +317,25 @@ test_parked_unpushed_probe() {
   # No remotes → HEAD --not --remotes lists the commit as unpushed.
   printf 'window=w1\nkind=ship\nmode=local-only\nworktree=%s\n' "$wt" \
     > "$home/state/parked.meta"
+  printf 'state: working · source: run-step · active run\n' \
+    > "$home/state/parked.current"
+  source_refill "$home" fm_refill_has_parked_unpushed \
+    && fail "working unpushed ship must not report parked-work hazard" || true
+  printf '3\n' > "$home/config/concurrency-floor"
+  source_refill "$home" fm_refill_emit_floor_if_needed \
+    || fail "floor should emit while an unpushed ship is working"
+  grep -F 'HOLD: parked ship worktree safety is not proven' \
+    "$home/state/.wake-queue" >/dev/null \
+    && fail "working unpushed ship must not hold floor top-up" || true
+  : > "$home/state/.wake-queue"
+  printf 'state: unknown · source: none · unreadable fixture\n' \
+    > "$home/state/parked.current"
+  source_refill "$home" fm_refill_has_parked_unpushed \
+    || fail "unreadable ship lifecycle should fail closed"
+  printf 'state: parked · source: run-step · parked at review\n' \
+    > "$home/state/parked.current"
   source_refill "$home" fm_refill_has_parked_unpushed \
     || fail "parked unpushed ship should report hazard"
-  printf '3\n' > "$home/config/concurrency-floor"
   source_refill "$home" fm_refill_emit_floor_if_needed \
     || fail "floor should still emit with HOLD note"
   grep -F 'HOLD: parked ship worktree safety is not proven' \

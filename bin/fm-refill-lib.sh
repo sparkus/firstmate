@@ -105,7 +105,8 @@ fm_refill_live_ship_count() {
 }
 
 fm_refill_has_parked_unpushed() {
-  local state=${1:-$STATE} meta kind wt unpushed
+  local state=${1:-$STATE} meta id kind verdict wt unpushed
+  local reader=${FM_CREW_STATE_BIN:-$_FM_REFILL_LIB_DIR/fm-crew-state.sh}
   FM_REFILL_HAZARD=
   shopt -s nullglob
   for meta in "$state"/*.meta; do
@@ -114,9 +115,28 @@ fm_refill_has_parked_unpushed() {
       shopt -u nullglob
       return 0
     fi
+    id=$(basename "$meta" .meta)
+    if ! fm_refill_task_id_valid "$id"; then
+      FM_REFILL_HAZARD="unreadable lifecycle state for $id"
+      shopt -u nullglob
+      return 0
+    fi
     kind=$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     [ -n "$kind" ] || kind=ship
     [ "$kind" = ship ] || continue
+    verdict=$(FM_HOME="$(dirname "$state")" FM_STATE_OVERRIDE="$state" \
+      FM_CREW_STATE_NM_TIMEOUT="${FM_REFILL_CREW_STATE_NM_TIMEOUT:-2}" \
+      "$reader" "$id" 2>/dev/null) || verdict=
+    case "$verdict" in
+      'state: parked · '*) ;;
+      'state: working · '*|'state: done · '*|'state: blocked · '*|\
+        'state: paused · '*|'state: failed · '*) continue ;;
+      *)
+        FM_REFILL_HAZARD="unreadable lifecycle state for $id"
+        shopt -u nullglob
+        return 0
+        ;;
+    esac
     wt=$(grep '^worktree=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
     if [ -z "$wt" ] || [ ! -d "$wt" ]; then
       FM_REFILL_HAZARD="unknown worktree state for $(basename "$meta" .meta)"
