@@ -25,8 +25,9 @@
 #   the task id (treehouse get --lease --lease-holder <id>), then the pane
 #   cds into that path - never a plain interactive get, which leaves the
 #   pool slot available for another spawn to steal. Recovery that still has
-#   a recorded worktree reuses that path and keeps its lease rather than
-#   double-leasing. An auto-detected herdr or cmux spawn prints a loud
+#   a recorded worktree reuses that path only while treehouse still reports
+#   its task-held lease; marker-free pre-lease worktrees retain their legacy
+#   reuse behavior. An auto-detected herdr or cmux spawn prints a loud
 #   stderr notice; auto-detected tmux stays silent; zellij and orca are
 #   never auto-detected.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
@@ -271,6 +272,8 @@ ORCA_TERMINAL=
 # after successful meta publication. Abort cleanup returns only a lease this
 # spawn acquired, never a recovered/reused worktree whose lease must stay held.
 TREEHOUSE_LEASE_ACQUIRED=0
+TREEHOUSE_LEASE_HOLDER=
+TREEHOUSE_LEASE_STATE=
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -353,7 +356,7 @@ spawn_abort_cleanup() {
   if [ "${TREEHOUSE_LEASE_ACQUIRED:-0}" = 1 ] && [ -n "${WT:-}" ]; then
     TREEHOUSE_LEASE_ACQUIRED=0
     if [ -n "${PROJ_ABS:-}" ] && [ -d "$WT" ] && command -v treehouse >/dev/null 2>&1; then
-      ( cd "$PROJ_ABS" && treehouse return --force "$WT" ) >/dev/null 2>&1 || true
+      ( cd "$PROJ_ABS" && treehouse return --force --if-lease-holder "$ID" "$WT" ) >/dev/null 2>&1 || true
     fi
   fi
   if [ "$SPAWN_TASK_LOCK_HELD" = 1 ]; then
@@ -914,6 +917,19 @@ validate_spawn_worktree() {  # <source> <inspect-target>
   fi
 }
 
+recorded_treehouse_lease_is_owned() {  # <worktree> <holder>
+  local worktree=$1 holder=$2 status
+  case "$worktree" in
+    *'"'*|*'\'*|*$'\n'*|*'},{'*) return 1 ;;
+  esac
+  status=$(CDPATH='' cd -- "$PROJ_ABS" && treehouse status --json) || return 1
+  printf '%s\n' "$status" \
+    | awk '{ gsub(/\},\{/, "}\n{"); print }' \
+    | grep -F "\"path\":\"$worktree\"" \
+    | grep -F '"status":"leased"' \
+    | grep -F "\"lease_holder\":\"$holder\"" >/dev/null
+}
+
 herdr_projection_meta_field_exact() {  # <meta> <key>
   local meta=$1 key=$2 count
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
@@ -1318,16 +1334,41 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # new spawn and hard-reset unlanded work (kunchenguid/firstmate#1441).
   #
   # Recovery / relaunch: if this task already records a still-present isolated
-  # worktree, reuse that path and keep whatever lease (or pre-lease in-use
-  # occupancy) it has. Never call get --lease again for the same task identity.
+  # worktree, reuse that path only when its recorded task lease is still held,
+  # or when marker-free metadata identifies a pre-lease worktree. Never call
+  # get --lease again for the same task identity.
   # Pre-existing unleased worktrees from before this change remain usable: spawn
   # and teardown do not require a lease marker, and teardown's treehouse return
   # still frees the slot when cleanup is allowed.
   existing_wt=
+  existing_lease_holder=
+  existing_lease_state=
   if [ -f "$STATE/$ID.meta" ]; then
     existing_wt=$(grep '^worktree=' "$STATE/$ID.meta" 2>/dev/null | cut -d= -f2- || true)
+    existing_lease_holder=$(fm_meta_get "$STATE/$ID.meta" treehouse_lease_holder)
+    existing_lease_state=$(fm_meta_get "$STATE/$ID.meta" treehouse_lease_state)
   fi
   if [ -n "$existing_wt" ] && [ -d "$existing_wt" ]; then
+    case "$existing_lease_state" in
+      '') ;;
+      held)
+        if [ "$existing_lease_holder" != "$ID" ] \
+          || ! recorded_treehouse_lease_is_owned "$existing_wt" "$ID"; then
+          echo "error: recorded worktree $existing_wt is not leased under task $ID; refusing stale recovery" >&2
+          exit 1
+        fi
+        TREEHOUSE_LEASE_HOLDER=$ID
+        TREEHOUSE_LEASE_STATE=held
+        ;;
+      returning|returned)
+        echo "error: recorded worktree $existing_wt has lease state $existing_lease_state; refusing recovery after return" >&2
+        exit 1
+        ;;
+      *)
+        echo "error: recorded worktree $existing_wt has unknown lease state $existing_lease_state; refusing recovery" >&2
+        exit 1
+        ;;
+    esac
     WT=$existing_wt
     validate_spawn_worktree "recorded worktree" "$T"
   else
@@ -1340,6 +1381,8 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       exit 1
     }
     TREEHOUSE_LEASE_ACQUIRED=1
+    TREEHOUSE_LEASE_HOLDER=$ID
+    TREEHOUSE_LEASE_STATE=held
     # Fail closed on a leased-but-wrong path before the pane is moved into it.
     validate_spawn_worktree "treehouse get --lease" "$T"
   fi
@@ -1665,6 +1708,8 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  [ -z "$TREEHOUSE_LEASE_HOLDER" ] || echo "treehouse_lease_holder=$TREEHOUSE_LEASE_HOLDER"
+  [ -z "$TREEHOUSE_LEASE_STATE" ] || echo "treehouse_lease_state=$TREEHOUSE_LEASE_STATE"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;

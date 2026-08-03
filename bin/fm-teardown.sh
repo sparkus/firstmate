@@ -124,9 +124,25 @@ FORCE=${2:-}
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 FM_LOCK_LOG_PREFIX=teardown
 
 META="$STATE/$ID.meta"
+TEARDOWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
+TEARDOWN_TASK_LOCK_HELD=0
+teardown_release_task_lock() {
+  if [ "$TEARDOWN_TASK_LOCK_HELD" = 1 ]; then
+    TEARDOWN_TASK_LOCK_HELD=0
+    fm_lock_release "$TEARDOWN_TASK_LOCK" || true
+  fi
+}
+if ! fm_lock_try_acquire "$TEARDOWN_TASK_LOCK"; then
+  echo "error: another spawn or teardown is already handling task $ID" >&2
+  exit 1
+fi
+TEARDOWN_TASK_LOCK_HELD=1
+trap teardown_release_task_lock EXIT
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 # This is the first cleanup authorization check. It is metadata-only and must
 # complete before fm-guard, a backend command, file removal, branch deletion,
@@ -150,6 +166,49 @@ if [ -z "$BUSY_GEN" ]; then
 fi
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
 ORCA_PATH_MATCH_VERIFIED=0
+TREEHOUSE_LEASE_HOLDER=$(fm_meta_get "$META" treehouse_lease_holder)
+TREEHOUSE_LEASE_STATE=$(fm_meta_get "$META" treehouse_lease_state)
+
+case "$TREEHOUSE_LEASE_STATE" in
+  '')
+    if [ -n "$TREEHOUSE_LEASE_HOLDER" ]; then
+      echo "REFUSED: task $ID has a treehouse lease holder without a lease state; preserving metadata." >&2
+      exit 1
+    fi
+    ;;
+  held|returned)
+    if [ "$TREEHOUSE_LEASE_HOLDER" != "$ID" ]; then
+      echo "REFUSED: task $ID has mismatched treehouse lease holder ${TREEHOUSE_LEASE_HOLDER:-<missing>}; preserving metadata." >&2
+      exit 1
+    fi
+    ;;
+  returning)
+    echo "REFUSED: task $ID has an indeterminate treehouse return; preserving metadata for manual lease inspection." >&2
+    exit 1
+    ;;
+  *)
+    echo "REFUSED: task $ID has unknown treehouse lease state $TREEHOUSE_LEASE_STATE; preserving metadata." >&2
+    exit 1
+    ;;
+esac
+
+treehouse_lease_state_set() {  # <state>
+  local state=$1 tmp
+  tmp=$(mktemp "$STATE/.${ID}.meta.treehouse-lease.XXXXXX") || return 1
+  if ! { grep -v '^treehouse_lease_state=' "$META" || true; } > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  printf 'treehouse_lease_state=%s\n' "$state" >> "$tmp" || {
+    rm -f "$tmp"
+    return 1
+  }
+  mv -f "$tmp" "$META" || {
+    rm -f "$tmp"
+    return 1
+  }
+  TREEHOUSE_LEASE_STATE=$state
+}
 
 KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
@@ -673,12 +732,16 @@ cleanup_stale_lock_for_safety_check() {
 # Return a worktree/home via `treehouse return --force`, tolerating a transient or
 # stale git index.lock left by a killed crew process. See the script header.
 teardown_treehouse_return() {
-  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-}
+  local dir=$1 cd_dir=$2 label=$3 post_cleanup_check=${4:-} lease_holder=${5:-}
   local out lock attempt=0 max_retries lock_desc
+  local -a return_args
+  return_args=(return --force)
+  [ -z "$lease_holder" ] || return_args+=(--if-lease-holder "$lease_holder")
+  return_args+=("$dir")
 
   # Capture stdout+stderr so non-lock failures stay visible and lock failures can
   # be matched by signature even when the lock file is already gone mid-check.
-  if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+  if out=$( ( cd "$cd_dir" && treehouse "${return_args[@]}" ) 2>&1 ); then
     [ -n "$out" ] && printf '%s\n' "$out"
     return 0
   fi
@@ -703,7 +766,7 @@ teardown_treehouse_return() {
     echo "teardown: $label return failed with transient git lock ($lock_desc); waiting ${TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${max_retries})" >&2
     sleep "$TREEHOUSE_RETURN_LOCK_RETRY_WAIT_SECS"
 
-    if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+    if out=$( ( cd "$cd_dir" && treehouse "${return_args[@]}" ) 2>&1 ); then
       [ -n "$out" ] && printf '%s\n' "$out"
       echo "teardown: $label return succeeded on retry; lock cleared on its own" >&2
       return 0
@@ -730,7 +793,7 @@ teardown_treehouse_return() {
           return 1
         fi
       fi
-      if out=$( ( cd "$cd_dir" && treehouse return --force "$dir" ) 2>&1 ); then
+      if out=$( ( cd "$cd_dir" && treehouse "${return_args[@]}" ) 2>&1 ); then
         [ -n "$out" ] && printf '%s\n' "$out"
         echo "teardown: $label return succeeded after stale-lock cleanup" >&2
         return 0
@@ -1094,6 +1157,11 @@ FMEOF
   TEARDOWN_HERDR_LOCK_RECORDS=
 }
 
+teardown_release_lifecycle_locks() {
+  teardown_release_herdr_locks
+  teardown_release_task_lock
+}
+
 teardown_herdr_session_lock_held() {  # <session>
   local session=$1 lock_session lock_path
   [ -n "$TEARDOWN_HERDR_LOCK_RECORDS" ] || return 1
@@ -1183,7 +1251,7 @@ $session	$lock_path"
       else
         TEARDOWN_HERDR_LOCK_RECORDS="$session	$lock_path"
       fi
-      trap teardown_release_herdr_locks EXIT
+      trap teardown_release_lifecycle_locks EXIT
       return 0
     fi
     sleep 0.1
@@ -1392,7 +1460,8 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   ORCA_PATH_MATCH_VERIFIED=1
 fi
 
-if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
+if [ -d "$WT" ] && [ "$FORCE" != "--force" ] \
+  && [ "$TREEHOUSE_LEASE_STATE" != returned ]; then
   if validate_worktree_teardown_safety; then
     :
   else
@@ -1442,27 +1511,44 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
-  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-  if [ "$branch" != "HEAD" ]; then
-    if git -C "$WT" checkout --detach -q 2>/dev/null; then
-      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+  if [ "$TREEHOUSE_LEASE_STATE" != returned ]; then
+    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+    if [ "$branch" != "HEAD" ]; then
+      if git -C "$WT" checkout --detach -q 2>/dev/null; then
+        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+      fi
+    fi
+    # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
+    rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
+      "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
+    # Kills remaining processes in the worktree (including the agent), resets, returns
+    # to pool. treehouse resolves the pool from the working directory, so run it from
+    # the project. teardown_treehouse_return tolerates transient and stale git locks
+    # left by a killed crew process; see the script header for retry and stale-lock proof.
+    post_lock_cleanup_check=
+    if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
+      post_lock_cleanup_check=validate_worktree_teardown_safety
+    fi
+    if [ "$TREEHOUSE_LEASE_STATE" = held ]; then
+      treehouse_lease_state_set returning || {
+        echo "error: could not record treehouse return ownership for $ID; teardown aborted" >&2
+        exit 1
+      }
+    fi
+    teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" "$TREEHOUSE_LEASE_HOLDER" || {
+      if [ -n "$TREEHOUSE_LEASE_HOLDER" ]; then
+        treehouse_lease_state_set held || true
+      fi
+      echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+      exit 1
+    }
+    if [ -n "$TREEHOUSE_LEASE_HOLDER" ]; then
+      treehouse_lease_state_set returned || {
+        echo "error: worktree returned but returned lease state could not be recorded for $ID; preserving metadata" >&2
+        exit 1
+      }
     fi
   fi
-  # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
-  rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
-    "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
-  # Kills remaining processes in the worktree (including the agent), resets, returns
-  # to pool. treehouse resolves the pool from the working directory, so run it from
-  # the project. teardown_treehouse_return tolerates transient and stale git locks
-  # left by a killed crew process; see the script header for retry and stale-lock proof.
-  post_lock_cleanup_check=
-  if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
-    post_lock_cleanup_check=validate_worktree_teardown_safety
-  fi
-  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
-    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
-    exit 1
-  }
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
