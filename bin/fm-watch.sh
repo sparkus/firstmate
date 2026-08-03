@@ -793,7 +793,11 @@ while :; do
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
           # Completion-triggered refill: merge is a completion event. Idempotent
           # with teardown's emit for the same task id (fm-refill-lib).
-          fm_refill_emit_completion "$id" || true
+          kind=$(fm_meta_get "$STATE/$id.meta" kind)
+          [ -n "$kind" ] || kind=ship
+          case "$kind" in
+            ship|scout) fm_refill_emit_completion "$id" || true ;;
+          esac
           if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$out"; then
             fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
               || triage_log "merged PR poll retirement remains recoverable for $id"
