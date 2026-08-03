@@ -408,7 +408,7 @@ All real tests use a uniquely named session and `tests/zellij-test-safety.sh`; t
 | Failure exit | actions against missing targets | Returned exit 0, requiring structural preflight and output-shape validation. |
 
 `pane_cwd` stayed frozen when a foreground subshell changed directory.
-The marker-delimited `pwd` probe returned the live nested cwd and is covered by the recorded real smoke, but that smoke predates task worktree leasing.
+The marker-delimited `pwd` probe returned the live nested cwd and is covered by the real smoke.
 The focus mitigation restored the previously active tab after `new-tab`, with the unavoidable narrow race documented in the operator guide.
 
 ```sh
@@ -416,7 +416,7 @@ tests/fm-backend-zellij.test.sh
 tests/fm-backend-zellij-smoke.test.sh
 ```
 
-The recorded real lifecycle smoke proved the endpoint, metadata, send, capture, refusal, landing, and cleanup paths without retaining task-specific ids or branch names here; the current leased-worktree landing path is covered by the behavior suites rather than that older live run.
+The real lifecycle smoke proved spawn, metadata, nested-subshell worktree discovery, send, capture, unlanded-work refusal, approved local landing, exact tab cleanup, and session cleanup without retaining task-specific ids or branch names here.
 
 ## Orca
 
