@@ -357,6 +357,8 @@ jobs:
           set -eu
           [ "$(readlink CLAUDE.md)" = "AGENTS.md" ] || { echo "::error::CLAUDE.md must be a symlink to AGENTS.md"; exit 1; }
           [ "$(readlink .claude/skills)" = "../.agents/skills" ] || { echo "::error::.claude/skills must be a symlink to ../.agents/skills"; exit 1; }
+          [ "$(readlink .codex/skills)" = "../.agents/skills" ] || { echo "::error::.codex/skills must be a symlink to ../.agents/skills"; exit 1; }
+          [ "$(readlink .grok/skills)" = "../.agents/skills" ] || { echo "::error::.grok/skills must be a symlink to ../.agents/skills"; exit 1; }
       - name: Personal fleet paths must not be tracked
         run: |
           set -eu
