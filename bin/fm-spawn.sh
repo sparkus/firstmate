@@ -170,23 +170,46 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SUB_HOME_MARKER=".fm-secondmate-home"
+# shellcheck source=bin/fm-gate-refuse-lib.sh
+. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+# Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
+# a direct report (see bin/fm-gate-refuse-lib.sh).
+fm_refuse_if_gate_agent
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
+FM_WAKE_DEFER_STATE_INIT=1
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+unset FM_WAKE_DEFER_STATE_INIT
+SPAWN_HOME_BOUNDARY=
+SPAWN_HOME_BOUNDARY_HELD=0
+spawn_home_boundary_cleanup() {
+  local status=$?
+  if [ "${SPAWN_HOME_BOUNDARY_HELD:-0}" = 1 ]; then
+    SPAWN_HOME_BOUNDARY_HELD=0
+    fm_lock_release "$SPAWN_HOME_BOUNDARY" || true
+  fi
+  return "$status"
+}
+trap spawn_home_boundary_cleanup EXIT
+SPAWN_HOME_BOUNDARY=$(fm_home_retirement_lock_path "$FM_HOME") || {
+  echo "error: could not resolve task home boundary for $FM_HOME; refusing spawn" >&2
+  exit 1
+}
+if ! fm_lock_try_acquire "$SPAWN_HOME_BOUNDARY"; then
+  echo "error: task home retirement is already handling $FM_HOME; refusing spawn" >&2
+  exit 1
+fi
+SPAWN_HOME_BOUNDARY_HELD=1
+mkdir -p "$STATE"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
-# shellcheck source=bin/fm-gate-refuse-lib.sh
-. "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
-# Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
-# a direct report (see bin/fm-gate-refuse-lib.sh).
-fm_refuse_if_gate_agent
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
 [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
@@ -283,8 +306,6 @@ HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
 SPAWN_TASK_LOCK_HELD=0
-SPAWN_HOME_BOUNDARY=
-SPAWN_HOME_BOUNDARY_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -426,6 +447,11 @@ spawn_herdr_presentation_order_lock_release() {
 idpart=${POS[0]:-}
 idpart=${idpart%%=*}
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
+  if ! fm_lock_release "$SPAWN_HOME_BOUNDARY"; then
+    echo "error: could not release task home boundary for $FM_HOME; refusing batch spawn" >&2
+    exit 1
+  fi
+  SPAWN_HOME_BOUNDARY_HELD=0
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
@@ -455,15 +481,6 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
-SPAWN_HOME_BOUNDARY=$(fm_home_retirement_lock_path "$FM_HOME") || {
-  echo "error: could not resolve task home boundary for $FM_HOME; refusing spawn $ID" >&2
-  exit 1
-}
-if ! fm_lock_try_acquire "$SPAWN_HOME_BOUNDARY"; then
-  echo "error: task home retirement is already handling $FM_HOME; refusing spawn $ID" >&2
-  exit 1
-fi
-SPAWN_HOME_BOUNDARY_HELD=1
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   echo "error: another spawn is already creating task $ID" >&2

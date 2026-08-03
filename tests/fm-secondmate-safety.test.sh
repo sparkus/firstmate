@@ -1817,6 +1817,53 @@ test_secondmate_retirement_blocks_new_child_spawn() {
   pass "secondmate retirement blocks new child spawns before leasing"
 }
 
+test_spawn_retirement_boundary_precedes_home_initialization() {
+  local home holder_state entered release holder_pid spawn_out spawn_rc state_created i
+  home="$TMP_ROOT/preinit-retirement-home"
+  holder_state="$TMP_ROOT/preinit-retirement-holder-state"
+  entered="$TMP_ROOT/preinit-retirement.entered"
+  release="$TMP_ROOT/preinit-retirement.release"
+  mkdir -p "$home"
+
+  bash -c '
+    set -eu
+    FM_WAKE_DEFER_STATE_INIT=1
+    STATE=$2
+    . "$1"
+    lock=$(fm_home_retirement_lock_path "$3")
+    fm_lock_try_acquire "$lock" || exit 1
+    : > "$4"
+    while [ ! -e "$5" ]; do sleep 0.01; done
+    fm_lock_release "$lock"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$holder_state" "$home" "$entered" "$release" &
+  holder_pid=$!
+  i=0
+  while [ ! -e "$entered" ] && [ "$i" -lt 200 ]; do
+    sleep 0.01
+    i=$((i + 1))
+  done
+  [ -e "$entered" ] || {
+    : > "$release"
+    wait "$holder_pid" || true
+    fail "retirement boundary holder did not acquire its lock"
+  }
+
+  set +e
+  spawn_out=$(FM_HOME="$home" "$ROOT/bin/fm-spawn.sh" newcomer alpha codex 2>&1)
+  spawn_rc=$?
+  set -e
+  state_created=0
+  [ ! -e "$home/state" ] || state_created=1
+  : > "$release"
+  wait "$holder_pid" || fail "retirement boundary holder failed"
+
+  [ "$spawn_rc" -ne 0 ] || fail "spawn entered a home under active retirement"
+  assert_contains "$spawn_out" "task home retirement is already handling $home" \
+    "spawn did not explain the active pre-initialization retirement boundary"
+  [ "$state_created" -eq 0 ] || fail "spawn initialized home state before checking retirement"
+  pass "spawn checks home retirement before home initialization"
+}
+
 test_secondmate_force_teardown_fails_closed_on_leased_child_return() {
   local home subhome childproj childwt fakebin log err rc
   home="$TMP_ROOT/force-leased-child-home"
@@ -2635,6 +2682,7 @@ test_secondmate_force_teardown_discards_child_work
 test_secondmate_force_teardown_respects_child_task_lock
 test_secondmate_retirement_refuses_metadata_free_child_lock
 test_secondmate_retirement_blocks_new_child_spawn
+test_spawn_retirement_boundary_precedes_home_initialization
 test_secondmate_force_teardown_fails_closed_on_leased_child_return
 test_secondmate_force_teardown_refuses_child_quarantine_symlink
 test_secondmate_force_teardown_preserves_child_on_unproven_lock
