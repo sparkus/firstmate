@@ -125,14 +125,6 @@ fm_lock_abs_path() {
   printf '%s/%s\n' "$dir" "$base"
 }
 
-fm_home_retirement_lock_path() {  # <home>
-  local home=$1 home_real home_parent home_name
-  home_real=$(cd "$home" 2>/dev/null && pwd -P) || return 1
-  home_parent=$(dirname "$home_real")
-  home_name=$(basename "$home_real")
-  printf '%s/.fm-home-retirement-%s.lock\n' "$home_parent" "$home_name"
-}
-
 fm_lock_owner_dir() {
   local lockdir=$1 lock_abs
   lock_abs=$(fm_lock_abs_path "$lockdir") || return 1
@@ -381,6 +373,138 @@ fm_lock_release() {
   [ "$pid" = "$current" ] || return 0
   fm_lock_clean_known_files "$lockdir"
   rmdir "$lockdir" 2>/dev/null || true
+}
+
+FM_HOME_LIFECYCLE_ROOT=
+FM_HOME_LIFECYCLE_MUTEX=
+FM_HOME_LIFECYCLE_ERROR=
+FM_HOME_SPAWN_REGISTRATION=
+FM_HOME_RETIREMENT_REGISTRATION=
+
+fm_home_lifecycle_resolve() {
+  local home=$1 home_real home_parent home_name
+  home_real=$(cd "$home" 2>/dev/null && pwd -P) || return 1
+  home_parent=$(dirname "$home_real")
+  home_name=$(basename "$home_real")
+  FM_HOME_LIFECYCLE_ROOT="$home_parent/.fm-home-lifecycle-$home_name"
+  FM_HOME_LIFECYCLE_MUTEX="$FM_HOME_LIFECYCLE_ROOT.lock"
+}
+
+fm_home_lifecycle_cleanup_root() {
+  rmdir "$1" 2>/dev/null || true
+}
+
+fm_home_spawn_register() {
+  local home=$1 task_id=$2 root mutex retiring registration
+  FM_HOME_LIFECYCLE_ERROR=
+  FM_HOME_SPAWN_REGISTRATION=
+  fm_home_lifecycle_resolve "$home" || {
+    FM_HOME_LIFECYCLE_ERROR=unavailable
+    return 1
+  }
+  root=$FM_HOME_LIFECYCLE_ROOT
+  mutex=$FM_HOME_LIFECYCLE_MUTEX
+  fm_lock_acquire_wait "$mutex"
+  if [ -L "$root" ] || { [ -e "$root" ] && [ ! -d "$root" ]; }; then
+    FM_HOME_LIFECYCLE_ERROR=unavailable
+    fm_lock_release "$mutex" || true
+    return 1
+  fi
+  if ! mkdir -p "$root"; then
+    FM_HOME_LIFECYCLE_ERROR=unavailable
+    fm_lock_release "$mutex" || true
+    return 1
+  fi
+  retiring="$root/retiring.lock"
+  if [ -e "$retiring" ] || [ -L "$retiring" ]; then
+    if fm_lock_try_acquire "$retiring"; then
+      fm_lock_release "$retiring" || true
+    else
+      FM_HOME_LIFECYCLE_ERROR=retiring
+      fm_home_lifecycle_cleanup_root "$root"
+      fm_lock_release "$mutex" || true
+      return 1
+    fi
+  fi
+  registration="$root/spawn-$task_id.lock"
+  if ! fm_lock_try_acquire "$registration"; then
+    if [ -e "$registration" ] || [ -L "$registration" ]; then
+      FM_HOME_LIFECYCLE_ERROR=active-spawn
+    else
+      FM_HOME_LIFECYCLE_ERROR=unavailable
+    fi
+    fm_home_lifecycle_cleanup_root "$root"
+    fm_lock_release "$mutex" || true
+    return 1
+  fi
+  FM_HOME_SPAWN_REGISTRATION=$registration
+  fm_lock_release "$mutex" || true
+}
+
+fm_home_spawn_unregister() {
+  local registration=$1 root mutex
+  [ -n "$registration" ] || return 0
+  root=$(dirname "$registration")
+  mutex="$root.lock"
+  fm_lock_acquire_wait "$mutex"
+  fm_lock_release "$registration" || true
+  fm_home_lifecycle_cleanup_root "$root"
+  fm_lock_release "$mutex" || true
+}
+
+fm_home_retirement_begin() {
+  local home=$1 root mutex retiring registration
+  FM_HOME_LIFECYCLE_ERROR=
+  FM_HOME_RETIREMENT_REGISTRATION=
+  fm_home_lifecycle_resolve "$home" || {
+    FM_HOME_LIFECYCLE_ERROR=unavailable
+    return 1
+  }
+  root=$FM_HOME_LIFECYCLE_ROOT
+  mutex=$FM_HOME_LIFECYCLE_MUTEX
+  fm_lock_acquire_wait "$mutex"
+  if [ -L "$root" ] || { [ -e "$root" ] && [ ! -d "$root" ]; }; then
+    FM_HOME_LIFECYCLE_ERROR=unavailable
+    fm_lock_release "$mutex" || true
+    return 1
+  fi
+  if ! mkdir -p "$root"; then
+    FM_HOME_LIFECYCLE_ERROR=unavailable
+    fm_lock_release "$mutex" || true
+    return 1
+  fi
+  retiring="$root/retiring.lock"
+  if ! fm_lock_try_acquire "$retiring"; then
+    FM_HOME_LIFECYCLE_ERROR=retiring
+    fm_home_lifecycle_cleanup_root "$root"
+    fm_lock_release "$mutex" || true
+    return 1
+  fi
+  for registration in "$root"/spawn-*.lock; do
+    [ -e "$registration" ] || [ -L "$registration" ] || continue
+    if fm_lock_try_acquire "$registration"; then
+      fm_lock_release "$registration" || true
+      continue
+    fi
+    FM_HOME_LIFECYCLE_ERROR=active-spawn
+    fm_lock_release "$retiring" || true
+    fm_home_lifecycle_cleanup_root "$root"
+    fm_lock_release "$mutex" || true
+    return 1
+  done
+  FM_HOME_RETIREMENT_REGISTRATION=$retiring
+  fm_lock_release "$mutex" || true
+}
+
+fm_home_retirement_end() {
+  local retiring=$1 root mutex
+  [ -n "$retiring" ] || return 0
+  root=$(dirname "$retiring")
+  mutex="$root.lock"
+  fm_lock_acquire_wait "$mutex"
+  fm_lock_release "$retiring" || true
+  fm_home_lifecycle_cleanup_root "$root"
+  fm_lock_release "$mutex" || true
 }
 
 fm_wake_clean_field() {

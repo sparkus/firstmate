@@ -147,7 +147,7 @@ FMEOF
   if [ -n "$TEARDOWN_HOME_RETIREMENT_LOCKS" ]; then
     while IFS= read -r home_lock; do
       [ -n "$home_lock" ] || continue
-      fm_lock_release "$home_lock" || true
+      fm_home_retirement_end "$home_lock" || true
     done <<FMEOF
 $TEARDOWN_HOME_RETIREMENT_LOCKS
 FMEOF
@@ -1195,15 +1195,17 @@ FMEOF
 
 teardown_home_retirement_lock_acquire() {  # <home>
   local home=$1 lock_path
-  lock_path=$(fm_home_retirement_lock_path "$home") || {
+  fm_home_lifecycle_resolve "$home" || {
     echo "error: could not resolve retirement boundary for child home $home" >&2
     return 1
   }
+  lock_path="$FM_HOME_LIFECYCLE_ROOT/retiring.lock"
   teardown_home_retirement_lock_held "$lock_path" && return 0
-  if ! fm_lock_try_acquire "$lock_path"; then
+  if ! fm_home_retirement_begin "$home"; then
     echo "error: task activity is already using child home $home; refusing retirement" >&2
     return 1
   fi
+  lock_path=$FM_HOME_RETIREMENT_REGISTRATION
   if [ -n "$TEARDOWN_HOME_RETIREMENT_LOCKS" ]; then
     TEARDOWN_HOME_RETIREMENT_LOCKS="$TEARDOWN_HOME_RETIREMENT_LOCKS
 $lock_path"

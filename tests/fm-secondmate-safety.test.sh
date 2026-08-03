@@ -1818,11 +1818,12 @@ test_secondmate_retirement_blocks_new_child_spawn() {
 }
 
 test_spawn_retirement_boundary_precedes_home_initialization() {
-  local home holder_state entered release holder_pid spawn_out spawn_rc state_created i
+  local home holder_state entered release record root holder_pid spawn_out spawn_rc state_created i
   home="$TMP_ROOT/preinit-retirement-home"
   holder_state="$TMP_ROOT/preinit-retirement-holder-state"
   entered="$TMP_ROOT/preinit-retirement.entered"
   release="$TMP_ROOT/preinit-retirement.release"
+  record="$TMP_ROOT/preinit-retirement.record"
   mkdir -p "$home"
 
   bash -c '
@@ -1830,12 +1831,13 @@ test_spawn_retirement_boundary_precedes_home_initialization() {
     FM_WAKE_DEFER_STATE_INIT=1
     STATE=$2
     . "$1"
-    lock=$(fm_home_retirement_lock_path "$3")
-    fm_lock_try_acquire "$lock" || exit 1
+    fm_home_retirement_begin "$3" || exit 1
+    retiring=$FM_HOME_RETIREMENT_REGISTRATION
+    printf "%s\n" "$retiring" > "$6"
     : > "$4"
     while [ ! -e "$5" ]; do sleep 0.01; done
-    fm_lock_release "$lock"
-  ' _ "$ROOT/bin/fm-wake-lib.sh" "$holder_state" "$home" "$entered" "$release" &
+    fm_home_retirement_end "$retiring"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$holder_state" "$home" "$entered" "$release" "$record" &
   holder_pid=$!
   i=0
   while [ ! -e "$entered" ] && [ "$i" -lt 200 ]; do
@@ -1856,11 +1858,14 @@ test_spawn_retirement_boundary_precedes_home_initialization() {
   [ ! -e "$home/state" ] || state_created=1
   : > "$release"
   wait "$holder_pid" || fail "retirement boundary holder failed"
+  root=$(dirname "$(cat "$record")")
 
   [ "$spawn_rc" -ne 0 ] || fail "spawn entered a home under active retirement"
   assert_contains "$spawn_out" "task home retirement is already handling $home" \
     "spawn did not explain the active pre-initialization retirement boundary"
   [ "$state_created" -eq 0 ] || fail "spawn initialized home state before checking retirement"
+  [ ! -e "$root/spawn-newcomer.lock" ] || fail "retirement refusal left a partial spawn registration"
+  [ ! -e "$root" ] || fail "retirement refusal left durable lifecycle state"
   pass "spawn checks home retirement before home initialization"
 }
 

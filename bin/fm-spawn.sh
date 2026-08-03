@@ -181,27 +181,6 @@ fm_refuse_if_gate_agent
 FM_WAKE_DEFER_STATE_INIT=1
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 unset FM_WAKE_DEFER_STATE_INIT
-SPAWN_HOME_BOUNDARY=
-SPAWN_HOME_BOUNDARY_HELD=0
-spawn_home_boundary_cleanup() {
-  local status=$?
-  if [ "${SPAWN_HOME_BOUNDARY_HELD:-0}" = 1 ]; then
-    SPAWN_HOME_BOUNDARY_HELD=0
-    fm_lock_release "$SPAWN_HOME_BOUNDARY" || true
-  fi
-  return "$status"
-}
-trap spawn_home_boundary_cleanup EXIT
-SPAWN_HOME_BOUNDARY=$(fm_home_retirement_lock_path "$FM_HOME") || {
-  echo "error: could not resolve task home boundary for $FM_HOME; refusing spawn" >&2
-  exit 1
-}
-if ! fm_lock_try_acquire "$SPAWN_HOME_BOUNDARY"; then
-  echo "error: task home retirement is already handling $FM_HOME; refusing spawn" >&2
-  exit 1
-fi
-SPAWN_HOME_BOUNDARY_HELD=1
-mkdir -p "$STATE"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -210,9 +189,6 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
-# Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
-# set by the batch loop below), so the guard runs once for the batch, not once per pair.
-[ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 KIND=ship
 HARNESS_ARG=
 MODEL=
@@ -262,6 +238,62 @@ case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
 esac
+
+idpart=${POS[0]:-}
+idpart=${idpart%%=*}
+if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
+  if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
+    echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
+    exit 1
+  fi
+  rc=0
+  shared_args=()
+  [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
+  [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
+  [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
+  [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
+  for pair in "${POS[@]}"; do
+    case "$pair" in
+      *=*) : ;;
+      *) echo "error: batch dispatch expects every argument as id=repo; got '$pair'" >&2; rc=2; continue ;;
+    esac
+    if [ "$KIND" = secondmate ]; then
+      echo "error: batch dispatch does not support --secondmate; spawn each secondmate explicitly" >&2
+      rc=2
+      continue
+    elif [ "$KIND" = scout ]; then
+      if "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}" --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+    else
+      if "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
+    fi
+  done
+  exit "$rc"
+fi
+ID=${POS[0]}
+fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+SPAWN_HOME_REGISTRATION=
+SPAWN_HOME_REGISTRATION_HELD=0
+spawn_home_registration_cleanup() {
+  local status=$?
+  if [ "${SPAWN_HOME_REGISTRATION_HELD:-0}" = 1 ]; then
+    SPAWN_HOME_REGISTRATION_HELD=0
+    fm_home_spawn_unregister "$SPAWN_HOME_REGISTRATION" || true
+  fi
+  return "$status"
+}
+trap spawn_home_registration_cleanup EXIT
+if ! fm_home_spawn_register "$FM_HOME" "$ID"; then
+  case "$FM_HOME_LIFECYCLE_ERROR" in
+    retiring) echo "error: task home retirement is already handling $FM_HOME; refusing spawn $ID" >&2 ;;
+    active-spawn) echo "error: another spawn is already registering task $ID" >&2 ;;
+    *) echo "error: could not register spawn $ID under task home $FM_HOME" >&2 ;;
+  esac
+  exit 1
+fi
+SPAWN_HOME_REGISTRATION=$FM_HOME_SPAWN_REGISTRATION
+SPAWN_HOME_REGISTRATION_HELD=1
+mkdir -p "$STATE"
+[ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else runtime auto-detection, else
@@ -400,9 +432,9 @@ spawn_abort_cleanup() {
     SPAWN_TASK_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_LOCK" || true
   fi
-  if [ "$SPAWN_HOME_BOUNDARY_HELD" = 1 ]; then
-    SPAWN_HOME_BOUNDARY_HELD=0
-    fm_lock_release "$SPAWN_HOME_BOUNDARY" || true
+  if [ "$SPAWN_HOME_REGISTRATION_HELD" = 1 ]; then
+    SPAWN_HOME_REGISTRATION_HELD=0
+    fm_home_spawn_unregister "$SPAWN_HOME_REGISTRATION" || true
   fi
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
@@ -438,60 +470,17 @@ spawn_herdr_presentation_order_lock_release() {
   fm_lock_release "$HERDR_PRESENTATION_ORDER_LOCK" || true
 }
 
-# Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
-# positional as one and spawn each by re-execing this script in single-task mode. We use
-# the FM_ROOT path (not $0) so it works whatever cwd or relative path invoked us, and reuse
-# the single path verbatim. A failed pair is reported and skipped; the rest still launch;
-# exit is non-zero if any pair failed. Single-task invocations never carry an '=' in arg
-# one (task ids are bare slugs), so they fall straight through to the logic below.
-idpart=${POS[0]:-}
-idpart=${idpart%%=*}
-if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac; then
-  if ! fm_lock_release "$SPAWN_HOME_BOUNDARY"; then
-    echo "error: could not release task home boundary for $FM_HOME; refusing batch spawn" >&2
-    exit 1
-  fi
-  SPAWN_HOME_BOUNDARY_HELD=0
-  if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
-    echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
-    exit 1
-  fi
-  rc=0
-  shared_args=()
-  [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
-  [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
-  [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
-  [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
-  for pair in "${POS[@]}"; do
-    case "$pair" in
-      *=*) : ;;
-      *) echo "error: batch dispatch expects every argument as id=repo; got '$pair'" >&2; rc=2; continue ;;
-    esac
-    if [ "$KIND" = secondmate ]; then
-      echo "error: batch dispatch does not support --secondmate; spawn each secondmate explicitly" >&2
-      rc=2
-      continue
-    elif [ "$KIND" = scout ]; then
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}" --scout; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
-    else
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}"; then :; else echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2; rc=1; fi
-    fi
-  done
-  exit "$rc"
-fi
-ID=${POS[0]}
-fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
 SPAWN_TASK_LOCK="$STATE/.spawn-$ID.lock"
 if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   echo "error: another spawn is already creating task $ID" >&2
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
-fm_lock_release "$SPAWN_HOME_BOUNDARY" || {
-  echo "error: could not release task home boundary for $FM_HOME; refusing spawn $ID" >&2
+fm_home_spawn_unregister "$SPAWN_HOME_REGISTRATION" || {
+  echo "error: could not finish spawn registration for $ID under $FM_HOME" >&2
   exit 1
 }
-SPAWN_HOME_BOUNDARY_HELD=0
+SPAWN_HOME_REGISTRATION_HELD=0
 PROJ=
 ARG3=
 FIRSTMATE_HOME=

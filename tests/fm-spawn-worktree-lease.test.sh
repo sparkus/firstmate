@@ -44,6 +44,15 @@ is_leased() {
   return 1
 }
 
+block_lease_get() {
+  [ -n "${FM_FAKE_TREEHOUSE_GET_ENTERED_DIR:-}" ] || return 0
+  mkdir -p "$FM_FAKE_TREEHOUSE_GET_ENTERED_DIR"
+  : > "$FM_FAKE_TREEHOUSE_GET_ENTERED_DIR/$holder"
+  while [ ! -e "${FM_FAKE_TREEHOUSE_GET_RELEASE:?}" ]; do
+    sleep 0.01
+  done
+}
+
 case "${1:-}" in
   get)
     shift
@@ -93,6 +102,7 @@ case "${1:-}" in
         exit 1
       fi
       printf '%s\n' "$path" > "$pool/leases/$holder"
+      block_lease_get
       printf 'leased worktree for %s\n' "$holder" >&2
       printf '%s\n' "$path"
       exit 0
@@ -102,6 +112,7 @@ case "${1:-}" in
       path=$(cat "$slot")
       is_leased "$path" && continue
       printf '%s\n' "$path" > "$pool/leases/$holder"
+      block_lease_get
       printf 'leased worktree for %s\n' "$holder" >&2
       printf '%s\n' "$path"
       exit 0
@@ -304,6 +315,83 @@ SH
 # ---------------------------------------------------------------------------
 # 1. Spawn leases; a subsequent plain get must not hand out the same path.
 # ---------------------------------------------------------------------------
+test_parallel_distinct_spawns_share_home() {
+  local case_dir home fakebin entered release id proj wt pool out status count i pid
+  local -a pids
+  case_dir="$TMP_ROOT/parallel-spawns"
+  home="$case_dir/home"
+  fakebin=$(fm_fakebin "$case_dir/fake")
+  entered="$case_dir/get-entered"
+  release="$case_dir/get-release"
+  mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config" "$entered"
+  printf 'codex\n' > "$home/config/crew-harness"
+  touch "$home/state/.last-watcher-beat"
+  install_lease_treehouse "$fakebin"
+  install_spawn_tmux "$fakebin"
+  pids=()
+
+  for i in 1 2 3 4 5 6; do
+    id="parallel-$i"
+    proj="$case_dir/project-$i"
+    wt="$case_dir/wt-$i"
+    pool="$case_dir/pool-$i"
+    out="$case_dir/spawn-$i.out"
+    status="$case_dir/spawn-$i.status"
+    mkdir -p "$home/data/$id" "$pool/slots" "$pool/leases"
+    printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+    fm_git_worktree "$proj" "$wt" "parallel-$i"
+    printf '%s\n' "$wt" > "$pool/slots/1"
+    (
+      set +e
+      FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+        FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+        FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+        FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
+        FM_FAKE_PANE_PATH="$wt" \
+        FM_FAKE_TREEHOUSE_POOL_DIR="$pool" \
+        FM_FAKE_TREEHOUSE_LOG="$case_dir/treehouse-$i.log" \
+        FM_FAKE_TREEHOUSE_GET_PATH="$wt" \
+        FM_FAKE_TREEHOUSE_GET_ENTERED_DIR="$entered" \
+        FM_FAKE_TREEHOUSE_GET_RELEASE="$release" \
+        FM_FAKE_TMUX_LOG="$case_dir/tmux-$i.log" \
+        FM_FAKE_TMUX_SEND_LOG="$case_dir/tmux-send-$i.log" \
+        PATH="$fakebin:$PATH" \
+        "$SPAWN" "$id" "$proj" codex > "$out" 2>&1
+      printf '%s\n' "$?" > "$status"
+      exit 0
+    ) &
+    pids+=("$!")
+  done
+
+  i=0
+  count=0
+  while [ "$count" -lt 6 ] && [ "$i" -lt 500 ]; do
+    count=$(find "$entered" -type f | wc -l | tr -d ' ')
+    sleep 0.01
+    i=$((i + 1))
+  done
+  if [ "$count" -ne 6 ]; then
+    : > "$release"
+    for pid in "${pids[@]}"; do wait "$pid" || true; done
+    fail "only $count of six distinct spawns registered concurrently"
+  fi
+  : > "$release"
+  for pid in "${pids[@]}"; do wait "$pid" || true; done
+
+  for i in 1 2 3 4 5 6; do
+    id="parallel-$i"
+    status="$case_dir/spawn-$i.status"
+    out="$case_dir/spawn-$i.out"
+    [ -f "$status" ] || fail "parallel spawn $id did not report its status"
+    [ "$(cat "$status")" -eq 0 ] || fail "parallel spawn $id failed: $(cat "$out")"
+    [ -f "$home/state/$id.meta" ] || fail "parallel spawn $id did not publish metadata"
+    [ -f "$case_dir/pool-$i/leases/$id" ] || fail "parallel spawn $id did not retain its lease"
+    grep -F 'task home retirement' "$out" >/dev/null \
+      && fail "parallel spawn $id was misclassified as retirement"
+  done
+  pass "six distinct tasks spawn concurrently under one home"
+}
+
 test_spawn_lease_blocks_second_get() {
   local rec out status lease_file second
   rec=$(make_lease_case lease-blocks-get ship-lease-a1)
@@ -635,6 +723,7 @@ test_legacy_unleased_worktree_spawn_and_teardown() {
   pass "pre-existing unleased worktrees do not break spawn or teardown"
 }
 
+test_parallel_distinct_spawns_share_home
 test_spawn_lease_blocks_second_get
 test_successful_teardown_releases_lease
 test_refused_teardown_keeps_lease
