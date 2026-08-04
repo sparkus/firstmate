@@ -23,6 +23,24 @@ Wake, watcher, away-mode, and X-specific state mechanics remain with their named
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Ship concurrency floor (config/concurrency-floor)
+
+`config/concurrency-floor` is an optional local, gitignored file under the effective Firstmate home that sets a target number of concurrent live ship workers for that home.
+The file is one non-negative base-10 integer on a single line; only a positive integer enables the floor.
+An absent, unreadable, symlinked, empty, zero, or non-numeric value means the floor is off.
+When the floor is on, `bin/fm-refill-lib.sh` counts only `kind=ship` workers whose authoritative `bin/fm-crew-state.sh` current state is `working`, whose recorded backend endpoint is present, and whose recovery-grade agent state is not confirmed dead or missing.
+Dead, unknown, terminal, parked, paused, scout, and secondmate records do not count as live capacity.
+When that live count drops below the target, the library enqueues one durable `check: refill floor:` wake so the supervising agent runs the normal claim-and-dispatch procedure.
+The floor is evaluated on locked session start, completion, watcher startup, and watcher heartbeat, while every running watcher cycle cheaply surfaces a newly queued or pending refill.
+The floor is independent of completion-triggered refill (merge-poll and teardown).
+Both paths exist so a missed rule cannot starve the queue.
+Neither path spawns work: they only surface the signal.
+Queued refill wakes, pending completion receipts, durable refill-needed markers, and an enabled below-target floor each keep the home supervision-active even when no task metadata remains.
+Successful ship spawn clears a handled completion need automatically, `bin/fm-refill-complete.sh <no-ready|no-eligible|held-only>` clears it after the ordinary claim-and-dispatch attempt completes without a spawn, and a met or disabled floor clears the floor need.
+Until ship worktree leases protect pool slots, every refill payload includes a hold when any ship has an unreadable lifecycle state or any parked ship worktree, including `local-only`, cannot be read successfully and proven free of unpushed commits.
+Coordinate with that lease work rather than reimplementing pool protection here.
+This preference is per home and is not part of secondmate inherited configuration.
+
 ## Pi Calm preference (config/calm)
 
 The Pi Calm extension stores the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, resolved from `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root derived from the extension path, or under `FM_CONFIG_OVERRIDE` when that test and specialized-setup override is present.

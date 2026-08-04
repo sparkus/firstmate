@@ -6,6 +6,8 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-refill-lib.sh
+. "$SCRIPT_DIR/fm-refill-lib.sh"
 
 DRAIN_TMP=
 DRAIN_LOCK_HELD=false
@@ -18,10 +20,10 @@ RAW_ROWS=
 # Reuse fm-guard.sh's existing graced, beacon-based alarm (FM_GUARD_GRACE) - do
 # not duplicate the beacon math. Because the watcher touches its beacon every
 # poll cycle, a normal fire leaves a recent beacon well inside grace and stays
-# silent; only a genuine stale-beyond-grace lapse with work in flight warns. Call
-# after the queue is emptied so guard never re-prints its own queued-wakes notice
-# for the records this run just drained, and never let a guard hiccup change the
-# drain's exit status.
+# silent; only a genuine stale-beyond-grace lapse while fleet, relay, or refill
+# work needs supervision warns. Call after the queue is emptied so guard never
+# re-prints its own queued-wakes notice for the records this run just drained,
+# and never let a guard hiccup change the drain's exit status.
 assert_watcher_liveness() {
   "$SCRIPT_DIR/fm-guard.sh" || true
 }
@@ -50,6 +52,8 @@ if [ ! -s "$FM_WAKE_QUEUE" ]; then
   assert_watcher_liveness
   exit 0
 fi
+
+fm_refill_finalize_completion_receipts "$FM_WAKE_QUEUE" "$STATE" || exit 1
 
 DRAIN_TMP="$STATE/.wake-queue.drain.$(fm_current_pid)"
 rm -f "$DRAIN_TMP"

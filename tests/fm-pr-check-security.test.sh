@@ -2396,6 +2396,11 @@ SH
     "watcher did not continue the healthy authenticated poll"
   [ ! -e "$state/task-a.check.sh" ] && [ ! -L "$state/task-a.check.sh" ] \
     || fail "watcher continuation rearmed the unsafe legacy check"
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-wake-drain.sh" \
+    > "$dir/watch-drain.out" 2>/dev/null \
+    || fail "could not drain the healthy poll and its completion refill"
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-refill-complete.sh" no-ready \
+    >/dev/null || fail "could not acknowledge the handled completion refill"
   rm -f "$state/a-replaced.check.sh" "$state/.last-check" "$x_poll_marker"
   printf '%s\n' '#!/usr/bin/env bash' "printf '%s\\n' custom-ready" > "$state/b-custom.check.sh"
   chmod 0700 "$state/b-custom.check.sh"
@@ -2952,6 +2957,11 @@ test_merged_poll_retires_once() {
   case "$first" in check:*task-a.check.sh:*merged) ;; *) fail "first merged notification was not preserved: $first" ;; esac
   assert_poll_absent "$state" task-a
   [ "$(cat "$state/task-a.meta")" = "$meta_before" ] || fail "merged retirement changed canonical metadata"
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-wake-drain.sh" \
+    > "$dir/watch-1-drain.out" 2>/dev/null \
+    || fail "could not drain the expected merged and refill wakes"
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-refill-complete.sh" no-ready \
+    >/dev/null || fail "could not acknowledge the handled refill wake"
 
   rm -f "$state/.last-check"
   set +e
@@ -2963,7 +2973,7 @@ test_merged_poll_retires_once() {
   case "$second" in check:*z-stop.check.sh:*stop-cycle) ;; *) fail "second cycle did not reach the control check: $second" ;; esac
   ! grep -F 'task-a.check.sh: merged' "$dir/watch-2.out" >/dev/null \
     || fail "retired merged poll executed a second time"
-  [ "$(grep -c $'\tcheck\t.*task-a.check.sh\t' "$state/.wake-queue" 2>/dev/null || true)" -eq 1 ] \
+  [ "$(grep -c $'\tcheck\t.*task-a.check.sh\t' "$dir/watch-1-drain.out" 2>/dev/null || true)" -eq 1 ] \
     || fail "merged poll did not queue exactly one terminal notification"
   pass "validated merged polls notify once and retire before the next watcher cycle"
 }
@@ -3003,6 +3013,11 @@ test_persistent_secondmate_retirement_is_poll_only() {
   [ "$(shasum -a 256 "$dir/home/data/secondmates.md")" = "$registry_before" ] || fail "retirement changed secondmate registry"
   [ "$(shasum -a 256 "$dir/endpoint-sentinel")" = "$endpoint_before" ] || fail "retirement changed secondmate endpoint evidence"
   [ -d "$dir/secondmate-home" ] || fail "retirement removed the persistent secondmate home"
+  [ ! -e "$state/.refill-completion-domain" ] \
+    || fail "persistent secondmate merge created a completion refill receipt"
+  ! awk -F '\t' '$3 == "check" && $4 ~ /^refill([:-]|$)/ { found=1 } END { exit !found }' \
+    "$state/.wake-queue" 2>/dev/null \
+    || fail "persistent secondmate merge queued claim-next refill work"
   pass "merged poll retirement preserves every persistent secondmate lifecycle artifact"
 }
 

@@ -531,6 +531,12 @@ test_teardown_prompts_tasks_axi_done_when_compatible() {
     || fail "teardown did not preserve date-gate check: $out"
   printf '%s\n' "$out" | grep -F 'keep Done to the 10 most recent' >/dev/null \
     && fail "teardown kept manual Done pruning in compatible tasks-axi prompt: $out"
+  # Printed reminder stays, and a durable completion-refill wake is enqueued once.
+  [ -f "$case_dir/state/.refill-completion-task-x1" ] \
+    || fail "teardown did not claim completion-refill marker for task-x1"
+  awk -F '\t' '$3 == "check" && $4 == "refill:task-x1" { found=1 } END { exit !found }' \
+    "$case_dir/state/.wake-queue" \
+    || fail "teardown did not enqueue durable refill:task-x1 wake"
   pass "teardown prompts tasks-axi backlog refresh when compatible"
 }
 

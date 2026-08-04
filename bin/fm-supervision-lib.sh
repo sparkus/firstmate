@@ -3,13 +3,16 @@
 # Usage: . bin/fm-supervision-lib.sh
 #
 # Reports whether a firstmate home needs supervision because it has in-flight
-# work (a state/<id>.meta exists) or an X-mode relay poll
-# (state/x-watch.check.sh), and whether its watcher has a fresh liveness beacon
+# work, an X-mode relay poll, or refill work, and whether its watcher has a fresh liveness beacon
 # (state/.last-watcher-beat, touched every poll cycle, within the grace window).
 # bin/fm-guard.sh keeps its task-specific grace-based warning predicate;
 # bin/fm-turnend-guard.sh uses the status fields here for its banner but performs
 # its end-of-turn block decision with the live watcher lock check in
 # bin/fm-wake-lib.sh.
+
+_FM_SUP_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-refill-lib.sh
+. "$_FM_SUP_LIB_DIR/fm-refill-lib.sh"
 
 # Portable mtime; Linux stat lacks -f, macOS stat lacks -c.
 fm_sup_stat_mtime() {
@@ -23,10 +26,11 @@ fm_sup_stat_mtime() {
 # fm_supervision_status <state-dir> [grace-seconds]
 # Populates, for the state dir at $1:
 #   FM_SUP_IN_FLIGHT      count of state/*.meta (in-flight tasks)
-#   FM_SUP_NEEDED         true/false - in-flight work or an X-mode relay poll
+#   FM_SUP_NEEDED         true/false - in-flight work, X-mode relay, or refill work
 #   FM_SUP_WATCHER_FRESH  true/false - a watcher beacon within the grace window
 #   FM_SUP_BEACON_DESC    human-readable beacon age, for banners ("never" if absent)
 #   FM_SUP_QUEUE_PENDING  true/false - state/.wake-queue has unread records
+#   FM_SUP_REFILL_NEEDED  true/false - refill queue, marker, or floor needs a cycle
 # grace-seconds defaults to $FM_GUARD_GRACE, then 300, matching fm-guard.sh.
 # Always returns 0; callers read the vars, or use fm_supervision_unhealthy below.
 fm_supervision_status() {
@@ -36,12 +40,16 @@ fm_supervision_status() {
   FM_SUP_WATCHER_FRESH=false
   FM_SUP_BEACON_DESC=never
   FM_SUP_QUEUE_PENDING=false
+  FM_SUP_REFILL_NEEDED=false
 
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
     FM_SUP_IN_FLIGHT=$((FM_SUP_IN_FLIGHT + 1))
   done
-  if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || [ -f "$state/x-watch.check.sh" ]; then
+  if fm_refill_supervision_needed "$state" "${FM_CONFIG_OVERRIDE:-$(dirname "$state")/config}"; then
+    FM_SUP_REFILL_NEEDED=true
+  fi
+  if [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || [ -f "$state/x-watch.check.sh" ] || [ "$FM_SUP_REFILL_NEEDED" = true ]; then
     FM_SUP_NEEDED=true
   fi
 
@@ -64,7 +72,7 @@ fm_supervision_status() {
 }
 
 # fm_supervision_needed <state-dir> [grace-seconds]
-# Exit 0 (true) exactly when in-flight work or an X-mode relay poll needs a
+# Exit 0 (true) exactly when in-flight work, an X-mode relay poll, or refill work needs a
 # watcher. Exit 1 (false) for an idle home.
 fm_supervision_needed() {
   fm_supervision_status "$@"

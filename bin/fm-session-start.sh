@@ -299,6 +299,9 @@ if [ "$READ_ONLY" -eq 1 ]; then
   GUARD_OUT=$(FM_GUARD_READ_ONLY=1 "$SCRIPT_DIR/fm-guard.sh" 2>&1)
   [ -n "$GUARD_OUT" ] && printf '%s\n' "$GUARD_OUT"
 else
+  # shellcheck source=bin/fm-refill-lib.sh
+  . "$SCRIPT_DIR/fm-refill-lib.sh"
+  fm_refill_emit_pending_if_needed >/dev/null 2>&1 || true
   DRAIN_OUT=$("$SCRIPT_DIR/fm-wake-drain.sh" 2>&1)
   if [ -n "$DRAIN_OUT" ]; then
     printf '%s\n' "$DRAIN_OUT"

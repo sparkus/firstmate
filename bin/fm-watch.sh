@@ -46,6 +46,12 @@
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
+#   check: refill completion <id>: ...
+#                          durable completion-triggered claim-next (fm-refill-lib)
+#   check: refill floor: ...
+#                          concurrency-floor top-up when live ships are below target
+#   check: refill pending: ...
+#                          durable refill need re-surfaced after its earlier wake drained
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 # For normal supervision, resume the session-start primary-harness protocol
@@ -77,6 +83,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-refill-lib.sh
+. "$SCRIPT_DIR/fm-refill-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -706,6 +714,10 @@ if ! fm_pr_poll_retirement_recover_all "$STATE" "$SCRIPT_DIR/fm-pr-poll.sh"; the
   wake "$reason"
 fi
 
+if fm_refill_emit_pending_if_needed; then
+  wake "$FM_REFILL_REASON"
+fi
+
 while :; do
   # Self-eviction: if the singleton lock no longer names this process, a second
   # watcher has taken over (e.g. a transient duplicate from a racy arm). Stand
@@ -717,8 +729,13 @@ while :; do
     exit 0
   fi
 
+  if fm_refill_surface_pending_if_needed; then
+    wake "$FM_REFILL_REASON"
+  fi
+
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
-  # alive. Supervision scripts warn when this goes stale with tasks in flight.
+  # alive. Supervision scripts warn when it goes stale while fleet, relay, or
+  # refill work needs supervision.
   touch "$STATE/.last-watcher-beat"
 
   # Parent-owned secondmate pending-reply reconciliation: resolve correlated
@@ -775,6 +792,13 @@ while :; do
         reason="check: $c: $out"
         fm_wake_append check "$c" "$reason" || exit 1
         if [ "$is_pr_poll" -eq 1 ] && [ "$out" = merged ]; then
+          # Completion-triggered refill: merge is a completion event. Idempotent
+          # with teardown's emit for the same task id (fm-refill-lib).
+          kind=$(fm_meta_get "$STATE/$id.meta" kind)
+          [ -n "$kind" ] || kind=ship
+          case "$kind" in
+            ship|scout) fm_refill_emit_completion "$id" || true ;;
+          esac
           if fm_pr_poll_retirement_publish "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" "$out"; then
             fm_pr_poll_retirement_recover_one "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
               || triage_log "merged PR poll retirement remains recoverable for $id"
@@ -1029,6 +1053,13 @@ EOF
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
+    # Concurrency floor: independent of completion events. When live ships are
+    # below config/concurrency-floor, enqueue a top-up refill and surface it
+    # even if the heartbeat would otherwise absorb as no-change.
+    if fm_refill_emit_floor_if_needed; then
+      touch "$STATE/.last-heartbeat"
+      wake "$FM_REFILL_REASON"
+    fi
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,
