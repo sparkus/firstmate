@@ -566,7 +566,11 @@ meta_field() { grep "^$2=" "$1" 2>/dev/null | tail -1 | cut -d= -f2-; }
 # capture technique in fm-spawn-dispatch-profile.test.sh so the constructed
 # launch command (not just meta) can be asserted on. Also answers the
 # `#{pane_current_path}` probe from FM_FAKE_PANE_PATH so this same stub works
-# for a crew/scout (non-secondmate) spawn's treehouse-worktree wait loop.
+# for a crew/scout (non-secondmate) spawn's leased-worktree landing wait.
+# Installs a lease-aware treehouse stub too: ship/scout spawns now run
+# `treehouse get --lease` in-process (path on stdout) before cd'ing the pane,
+# so a bare system treehouse against an unregistered test project would fail
+# before meta is written.
 make_launch_capturing_tmux() {
   local dir=$1 fakebin="$1/fakebin"
   mkdir -p "$fakebin"
@@ -596,6 +600,26 @@ esac
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  get)
+    has_lease=0
+    for a in "$@"; do
+      [ "$a" = --lease ] && has_lease=1
+    done
+    if [ "$has_lease" -eq 1 ]; then
+      path="${FM_FAKE_TREEHOUSE_HOME:-${FM_FAKE_PANE_PATH:-}}"
+      [ -n "$path" ] && printf '%s\n' "$path"
+    fi
+    exit 0
+    ;;
+  return) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
   printf '%s\n' "$fakebin"
 }
 
@@ -951,11 +975,30 @@ SH
 exit 0
 SH
   chmod +x "$fakebin/gh"
+  # Lease-aware: ship/scout paths need get --lease to print a path. Secondmate
+  # spawns skip treehouse lease, but bootstrap/tool-version probes may still call
+  # `treehouse get --help`. Keep help text and return a leased path when asked.
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
-  printf '%s\n' 'Usage: treehouse get [--lease]'
-fi
+set -u
+case "${1:-}" in
+  get)
+    if [ "${2:-}" = --help ]; then
+      printf '%s\n' 'Usage: treehouse get [--lease]'
+      exit 0
+    fi
+    has_lease=0
+    for a in "$@"; do
+      [ "$a" = --lease ] && has_lease=1
+    done
+    if [ "$has_lease" -eq 1 ]; then
+      path="${FM_FAKE_TREEHOUSE_HOME:-${FM_FAKE_PANE_PATH:-}}"
+      [ -n "$path" ] && printf '%s\n' "$path"
+    fi
+    exit 0
+    ;;
+  return) exit 0 ;;
+esac
 exit 0
 SH
   chmod +x "$fakebin/treehouse"

@@ -140,13 +140,12 @@ p_wrap=$(fm_backend_zellij_current_path "$TARGET") || fail "current_path failed 
 [ "$p_wrap" = "$LONG_CWD" ] || fail "real zellij: current_path did not reconstruct a long wrapped cwd, got '$p_wrap'"
 pass "real zellij: current_path reconstructs a long cwd that can wrap in the terminal"
 
-# The load-bearing case: a NESTED SUBSHELL's own cd (exactly what `treehouse
-# get` does). Verified real bug: zellij's `pane_cwd` JSON field stays frozen
+# The nested-subshell compatibility case. Verified real bug: zellij's
+# `pane_cwd` JSON field stays frozen
 # at wherever the pane's shell was when it launched the subshell as a
 # foreground command - it never follows the subshell's own cd, even once
 # that subshell is fully interactive. fm_backend_zellij_current_path's active
-# pwd-probe (docs/zellij-backend.md) is what fm-spawn.sh's worktree-discovery
-# poll actually depends on, so this must be proven against a real subshell,
+# pwd-probe (docs/zellij-backend.md) must keep reporting the live shell path,
 # not just a plain cd in the pane's own top-level shell (the case above).
 fm_backend_zellij_send_text_line "$TARGET" 'cd / && bash'
 sleep 0.5

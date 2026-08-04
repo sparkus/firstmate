@@ -63,8 +63,8 @@ herdr_forget_inherited_pane
 # low-noise scratch fixture shape used by
 # tests/fm-backend-autodetect-smoke.test.sh.
 # fm-spawn no longer needs this as a symlink workaround: fm-spawn-symlink-guard-s8
-# canonicalized project and backend cwd comparisons in the worktree-discovery
-# poll.
+# canonicalized project and backend cwd comparisons in the leased-worktree
+# landing poll.
 TMP_ROOT=$(mktemp -d "$(cd "${TMPDIR:-/tmp}" && pwd -P)/fm-herdr-e2e.XXXXXX")
 SESSION="fm-lab-herdr-e2e-$$"
 export HERDR_SESSION="$SESSION"

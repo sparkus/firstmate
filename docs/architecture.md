@@ -133,6 +133,9 @@ Codex App support is recorded in `docs/codex-app-backend.md`; it is not selectab
 ## Worktrees, not branches in your checkout
 
 Crewmates never intentionally touch your project clone; [treehouse](https://github.com/kunchenguid/treehouse) pools clean worktrees for tmux, herdr, zellij, and cmux tasks, while Orca creates its own worktrees for `backend=orca`.
+Treehouse-backed ship and scout spawns durably lease the chosen pool slot under the task id before sending the worker into its known path.
+After task metadata is published, the lease survives parked or idle workers and is released only by a successful `treehouse return` during teardown; a refused teardown or failed return preserves both the worktree and its lease.
+A spawn that aborts before publishing task metadata releases only a lease whose holder still matches that task id, because no worker-owned task state can yet depend on the slot.
 For ship and scout work, `fm-spawn.sh` refuses to launch unless the resolved task path is a real git worktree root that is distinct from the project primary checkout.
 
 The firstmate repo has one extra exposure because it can dispatch crewmates to work on itself.
