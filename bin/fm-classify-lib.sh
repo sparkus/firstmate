@@ -400,7 +400,7 @@ stale_is_terminal() {  # <window> <state>
 # captain-relevant. This is the cheap fleet-scan both supervisors run as a
 # catch-all backstop for a captain-relevant status the per-wake path might miss.
 # No dedup is applied here: each consumer dedupes against its own seen-state (the
-# daemon against .subsuper-seen-status-*, the watcher against .seen-* signatures).
+# daemon via status_line_already_seen in bin/fm-supervise-daemon.sh (including .hb-surfaced-*); watcher via .seen-* signatures).
 scan_captain_relevant_statuses() {  # <state>
   local state=$1 f last task
   for f in "$state"/*.status; do
