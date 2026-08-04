@@ -715,6 +715,33 @@ test_signal_escalate_marks_seen_no_catchall_refire() {
   pass "captain signal escalate marks seen so the catch-all scan does not re-fire"
 }
 
+test_catchall_honours_hb_surfaced_no_refire() {
+  # Always-on firstmate already surfaced a done: line (watcher wrote
+  # .hb-surfaced-*), then away mode starts. The catch-all must NOT re-escalate
+  # that historical completion - the 2026-08-02 production defect.
+  local dir state key line
+  dir=$(make_supercase scan-hb-surfaced)
+  state="$dir/state"
+  line='done: Leads stage seed manifest landed - https://example.test/pr/131'
+  printf '%s\n' "$line" > "$state/hist-t9.status"
+  key=$(printf '%s' "hist-t9" | tr ':/.' '___')
+  # Simulate always-on mark_surfaced only (no daemon escalate / no subsuper-seen).
+  printf '%s' "$line" > "$state/.hb-surfaced-$key"
+  [ ! -e "$state/.subsuper-seen-status-$key" ] || fail "precondition: subsuper-seen must be absent"
+  rm -f "$state/.subsuper-last-scan"
+  : > "$state/.subsuper-escalations"
+  FM_STATE_OVERRIDE="$state" housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "catch-all re-escalated a completion already surfaced via .hb-surfaced: $(cat "$state/.subsuper-escalations")"
+  # Signal path must still escalate a captain-relevant line that only has
+  # hb-surfaced (not subsuper-seen): the watcher marks hb before the daemon
+  # classifies, and promoting hb into subsuper would swallow that delivery.
+  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/hist-t9.status" "$state"
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "signal path failed to escalate when only .hb-surfaced matched (would drop the delivery)"
+  pass "catch-all honours .hb-surfaced without blocking the signal escalate path"
+}
+
 test_collapse_newlines_pure() {
   local out
   out=$(_collapse_newlines $'line one\nline two\nline three')
@@ -1863,6 +1890,7 @@ test_inject_skip_forces_self
 test_is_wake_reason_distinguishes_status_stdout
 test_terminal_stale_escalate_leaves_no_marker
 test_signal_escalate_marks_seen_no_catchall_refire
+test_catchall_honours_hb_surfaced_no_refire
 test_collapse_newlines_pure
 test_afk_absent_daemon_does_not_inject
 test_busy_guard_defers_when_supervisor_busy
