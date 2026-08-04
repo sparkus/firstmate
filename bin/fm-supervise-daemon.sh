@@ -537,7 +537,7 @@ mark_status_seen() {  # <state> <task> <last-line>
 #      captain-relevant status to firstmate (and also when the afk watcher hands
 #      the same line to this daemon). Without (2), a fresh away-mode session
 #      re-escalates historical done: lines firstmate already handled while afk
-#      was off - the defect observed 2026-08-02.
+#      was off.
 # Does NOT promote hb into subsuper-seen: the always-on/afk watcher marks hb
 # before the daemon's signal path runs, and promoting would let classify_signal
 # self-handle as "already escalated" without ever delivering the event.

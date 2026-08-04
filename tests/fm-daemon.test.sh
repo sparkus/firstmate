@@ -718,7 +718,7 @@ test_signal_escalate_marks_seen_no_catchall_refire() {
 test_catchall_honours_hb_surfaced_no_refire() {
   # Always-on firstmate already surfaced a done: line (watcher wrote
   # .hb-surfaced-*), then away mode starts. The catch-all must NOT re-escalate
-  # that historical completion - the 2026-08-02 production defect.
+  # that historical completion.
   local dir state key line
   dir=$(make_supercase scan-hb-surfaced)
   state="$dir/state"
