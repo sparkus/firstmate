@@ -528,6 +528,29 @@ mark_status_seen() {  # <state> <task> <last-line>
   printf '%s' "$line" > "$state/.subsuper-seen-status-$(_stale_key "$task")"
 }
 
+# 0 if this captain-relevant last line was already escalated or already
+# surfaced to firstmate, so the catch-all scan must not re-fire it.
+# Checks, in order:
+#   1. .subsuper-seen-status-<task> - written by the daemon's per-wake escalate
+#      path (mark_escalated_seen) and by the catch-all itself after it escalates.
+#   2. .hb-surfaced-<task> - written by the always-on watcher when it surfaces a
+#      captain-relevant status to firstmate (and also when the afk watcher hands
+#      the same line to this daemon). Without (2), a fresh away-mode session
+#      re-escalates historical done: lines firstmate already handled while afk
+#      was off.
+# Does NOT promote hb into subsuper-seen: the always-on/afk watcher marks hb
+# before the daemon's signal path runs, and promoting would let classify_signal
+# self-handle as "already escalated" without ever delivering the event.
+status_line_already_seen() {  # <state> <task> <last-line>
+  local state=$1 task=$2 line=$3 key seen
+  key=$(_stale_key "$task")
+  seen="$state/.subsuper-seen-status-$key"
+  [ "$(cat "$seen" 2>/dev/null || true)" = "$line" ] && return 0
+  seen="$state/.hb-surfaced-$key"
+  [ "$(cat "$seen" 2>/dev/null || true)" = "$line" ] && return 0
+  return 1
+}
+
 # Mark every captain-relevant status line a per-wake classification escalated as
 # seen, so the catch-all scan does not re-escalate the same line within
 # HEARTBEAT_SCAN_SECS. Mirrors classify_signal/classify_stale's relevance test.
@@ -1060,14 +1083,14 @@ housekeeping() {  # <state>
   # (3) heartbeat scan (catch-all for a captain-relevant status the per-wake
   #     classifier may have missed). Cheap: status files only, no tmux. The
   #     captain-relevant filtering is the shared classifier's
-  #     scan_captain_relevant_statuses; the daemon layers its digest dedup on top.
+  #     scan_captain_relevant_statuses; the daemon layers its digest dedup on top
+  #     via status_line_already_seen (subsuper-seen from escalate paths, and
+  #     hb-surfaced from always-on / watcher surfacing - see that helper).
   if [ "$(_file_age "$state/.subsuper-last-scan")" -ge "${FM_HEARTBEAT_SCAN_SECS:-$HEARTBEAT_SCAN_SECS_DEFAULT}" ]; then
     _now > "$state/.subsuper-last-scan"
-    local seen
     while IFS="$(printf '\t')" read -r f task last; do
       [ -n "$f" ] || continue
-      seen="$state/.subsuper-seen-status-$(_stale_key "$task")"
-      [ "$(cat "$seen" 2>/dev/null || true)" = "$last" ] && continue
+      status_line_already_seen "$state" "$task" "$last" && continue
       escalate_add "$state" "$(basename "$f"): $last (catch-all scan)"
       mark_status_seen "$state" "$task" "$last"
     done < <(scan_captain_relevant_statuses "$state")
